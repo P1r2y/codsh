@@ -1,0 +1,25 @@
+# 本地运行时、账号配置、日志和构建产物不属于发布源码。
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+.env
+.env.*
+auth.json
+config.toml
+.codex/
+sessions/
+archived_sessions/
+artifacts/
+tests/
+removed-shortcuts/
+app/
+plugins/
+plugins.json
+installation.json
+shortcut-integration.json
+*.zip
+*.png
+*.jpg
+*.jpeg
+*.lnk
