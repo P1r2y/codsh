@@ -215,10 +215,15 @@ async function selfTest() {
   try {
     await app.whenReady();
     const fixture = JSON.parse(fs.readFileSync(process.env.CODEX_USAGE_UI_FIXTURE,'utf8'));
+    const snapshots=new Map([[fixture.snapshot.threadId,fixture.snapshot]]),responseDelays=new Map();
     let pluginEnabled=true;
     const pluginCode=fs.readFileSync(path.join(__dirname,'usage-preload.cjs'),'utf8');
     ipcMain.handle('codex-enhancement-loader:state-v1',()=>({enabled:pluginEnabled,key:'fixture',code:pluginCode}));
-    ipcMain.handle(CHANNEL,(_event,request)=>request?.threadId===fixture.snapshot.threadId?fixture.snapshot:{threadId:request?.threadId,available:false,limits:fixture.snapshot.limits});
+    ipcMain.handle(CHANNEL,async(_event,request)=>{
+      const id=request?.threadId,delay=responseDelays.get(id)??0;
+      if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
+      return snapshots.get(id)??{threadId:id,available:false,limits:fixture.snapshot.limits};
+    });
     const win = new BrowserWindow({width:1200,height:820,show:false,webPreferences:{preload:path.join(__dirname,'enhancement-preload.cjs'),contextIsolation:true,sandbox:true,backgroundThrottling:false,offscreen:true}});
     await win.loadFile(process.env.CODEX_USAGE_UI_FIXTURE_HTML);
     await new Promise(resolve=>setTimeout(resolve,2200));
@@ -292,6 +297,40 @@ async function selfTest() {
     const disabledState=await win.webContents.executeJavaScript(`({nodes:document.querySelectorAll('.cu-strip,.cu-turn,.cu-ring,.cu-tooltip,.cu-panel').length,nativeInset:parseFloat(getComputedStyle(document.querySelector('[data-thread-scroll-footer]')).paddingBottom),adjusted:document.querySelector('[data-thread-scroll-footer]').classList.contains('cu-footer'),actions:document.querySelectorAll('.cu-action-row').length})`);
     pluginEnabled=true;await delay(2300);
     const enabledState=await win.webContents.executeJavaScript(`({ring:!!document.querySelector('.cu-ring'),footers:document.querySelectorAll('.cu-turn').length})`);
+    const secondId='00000000-0000-4000-8000-000000000002',second=structuredClone(fixture.snapshot);
+    second.threadId=secondId;
+    const doubleUsage=u=>Object.fromEntries(Object.entries(u).map(([key,value])=>[key,value*2]));
+    second.turns.forEach((turn,i)=>{
+      turn.id=`22222222-2222-4222-8222-${String(i+1).padStart(12,'0')}`;turn.usage=doubleUsage(turn.usage);
+      turn.models?.forEach(model=>{model.usage=doubleUsage(model.usage);});
+      for(const key of ['averageTps','estimatedGenerationTps'])if(turn[key]!=null)turn[key]*=2;
+    });
+    second.models.forEach(model=>{model.usage=doubleUsage(model.usage);});
+    second.total=Object.fromEntries(Object.keys(second.total).map(key=>[key,second.turns.reduce((n,t)=>n+t.usage[key],0)]));
+    snapshots.set(secondId,second);
+    await win.webContents.executeJavaScript(`(()=>{
+      const first=document.querySelector('main.chat'),other=first.cloneNode(true);first.dataset.fixtureView='first';other.dataset.fixtureView='second';
+      other.querySelectorAll('.cu-turn').forEach(e=>e.remove());
+      [...other.querySelectorAll('[data-content-search-turn-key],[data-codex-usage-turn]')].forEach((root,i)=>{
+        root.removeAttribute('data-codex-usage-turn');root.removeAttribute('data-codex-usage-thread');root.setAttribute('data-content-search-turn-key',${JSON.stringify(second.turns.map(t=>t.id))}[i]);
+        const response=root.querySelector('.response'),actions=root.querySelector('.turn-action-controls'),wrapper=document.createElement('div');
+        response.setAttribute('data-response-annotation-target','fixture-'+i);response.setAttribute('data-response-annotation-conversation',${JSON.stringify(secondId)});
+        actions.classList.remove('actions','cu-action-row');actions.querySelectorAll('.cu-turn').forEach(e=>e.remove());response.append(wrapper);wrapper.append(actions);
+      });first.after(other);other.hidden=true;
+      window.fixtureNavigate=id=>{first.hidden=id!==${JSON.stringify(fixture.snapshot.threadId)};other.hidden=id!==${JSON.stringify(secondId)};document.querySelector('[data-above-composer-conversation-id]').setAttribute('data-above-composer-conversation-id',id??'');};
+      window.fixtureNavigate(${JSON.stringify(secondId)});
+    })()`);
+    const navigationState=()=>win.webContents.executeJavaScript(`(()=>{const active=[...document.querySelectorAll('main.chat')].find(e=>!e.hidden),strip=document.querySelector('.cu-strip'),footers=[...(active?.querySelectorAll('.cu-turn')??[])];return {strip:strip?.textContent,thread:strip?.dataset.cuThread,visibleFooters:footers.length,inline:footers.every(e=>{const a=e.getBoundingClientRect(),b=e.parentElement.getBoundingClientRect();return e.parentElement.classList.contains('turn-action-controls')&&Math.abs(a.y+a.height/2-b.y-b.height/2)<.5}),hiddenFooters:[...document.querySelectorAll('main.chat[hidden] .cu-turn')].length,turns:[...(active?.querySelectorAll('.cu-turn [data-cu-turn]')??[])].map(e=>e.dataset.cuTurn),panel:!!document.querySelector('.cu-panel[data-state=open]')}})()`);
+    await delay(2100);const switched=await navigationState();
+    fs.writeFileSync(output+'.navigation.png',(await win.webContents.capturePage()).toPNG());
+    await win.webContents.executeJavaScript(`(()=>{const row=document.querySelector('main[data-fixture-view=second] .turn-action-controls'),next=row.cloneNode(true);next.querySelectorAll('.cu-turn').forEach(e=>e.remove());row.replaceWith(next);})()`);
+    await delay(250);const replacedActions=await navigationState();
+    await win.webContents.executeJavaScript(`window.fixtureNavigate(${JSON.stringify(fixture.snapshot.threadId)})`);await delay(250);const returned=await navigationState();
+    responseDelays.set(secondId,450);
+    await win.webContents.executeJavaScript(`window.fixtureNavigate(${JSON.stringify(secondId)})`);await delay(80);
+    const waiting=await navigationState();
+    await win.webContents.executeJavaScript(`window.fixtureNavigate(${JSON.stringify(fixture.snapshot.threadId)})`);await delay(700);const rapidReturn=await navigationState();
+    await win.webContents.executeJavaScript(`window.fixtureNavigate(null)`);await delay(250);const emptyThread=await navigationState();
     const checks={
       layout:!!report.strip&&report.stripHeight===46&&report.composerShift===8&&Math.abs(report.verticalCenterOffset)<.1,
       replies:report.footers===2&&report.replyStats.every(r=>!r.text.includes('≈')&&!/月|\d{2}:\d{2}/.test(r.text)&&r.hoverTitles===0&&r.inline),
@@ -309,7 +348,14 @@ async function selfTest() {
       live:liveState.live?.includes('62.5')&&liveState.footers===1&&liveState.stableAnchor&&livePanel.visible&&livePanel.text.includes('910,000 tok')&&!finishedState.live&&finishedState.footers===2,
       lifecycle:disabledState.nodes===0&&disabledState.nativeInset===24&&!disabledState.adjusted&&disabledState.actions===0&&enabledState.ring&&enabledState.footers===2
     };
-    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,contextPanel,contextColors,replyPanel,escapeState,outsideState,tooltipState,liveState,livePanel,finishedState,disabledState,enabledState});
+    Object.assign(checks,{
+      navigation:switched.strip.includes('1.8M tok')&&switched.visibleFooters===2&&switched.inline&&switched.hiddenFooters===0&&switched.turns.every(id=>second.turns.some(t=>t.id===id)),
+      replacedActions:replacedActions.visibleFooters===2&&replacedActions.inline&&replacedActions.hiddenFooters===0,
+      returnNavigation:returned.strip.includes('910K tok')&&returned.visibleFooters===2&&returned.hiddenFooters===0,
+      rapidNavigation:!waiting.strip.includes('910K tok')&&rapidReturn.strip.includes('910K tok')&&rapidReturn.visibleFooters===2&&rapidReturn.hiddenFooters===0,
+      emptyThread:!emptyThread.strip.includes('tok')&&emptyThread.visibleFooters===0&&emptyThread.hiddenFooters===0
+    });
+    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,contextPanel,contextColors,replyPanel,escapeState,outsideState,tooltipState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread}});
     win.destroy(); app.exit(0);
   } catch (e) { write({ok:false,error:String(e),stack:e.stack}); app.exit(1); }
 }

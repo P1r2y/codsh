@@ -18,6 +18,8 @@
     stopped=true;activeObserver?.disconnect();clearInterval(activePoll);clearTimeout(timer);
     clearTimeout(panelCloseTimer);clearTimeout(quotaHideTimer);clearTimeout(quotaCloseTimer);
     window.removeEventListener('resize',onResize);
+    window.removeEventListener('popstate',onNavigation);
+    window.removeEventListener('hashchange',onNavigation);
     document.removeEventListener('pointerdown',onOutsidePointer,true);
     document.removeEventListener('keydown',onPanelKeydown,true);
     document.removeEventListener('scroll',positionMetricPanel,true);
@@ -45,13 +47,36 @@
     const el = document.createElement(tag); if (className) el.className = className;
     if (text != null) el.textContent = text; return el;
   }
-  function visible(el) { return el && el.getClientRects().length > 0 && el.closest('[aria-hidden="true"]') == null; }
+  function visible(el) {
+    return el && el.getClientRects().length > 0 && el.closest('[aria-hidden="true"],[hidden],[inert]') == null && !['hidden','collapse'].includes(getComputedStyle(el).visibility);
+  }
+  const threadId=value=>typeof value==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)?value.toLowerCase():null;
+  function activeComposer() {
+    const composers=[...document.querySelectorAll('[data-thread-find-composer]')].filter(visible);
+    return composers.find(el=>el.contains(document.activeElement))??composers.at(-1)??null;
+  }
   function getThreadId() {
+    const composer=activeComposer();
+    // 原生 portal 为空时会隐藏，读取所属输入框的标记，不要求 portal 自身可见。
+    for(const scope of [composer,composer?.closest('[data-thread-scroll-footer]')]){
+      const portals=scope?[...scope.querySelectorAll('[data-above-composer-conversation-id]')]:[];
+      if(portals.length){
+        const ids=new Set(portals.map(el=>threadId(el.getAttribute('data-above-composer-conversation-id'))));
+        return ids.size===1?[...ids][0]:null;
+      }
+    }
+    const responses=[...document.querySelectorAll('[data-response-annotation-conversation]')].filter(visible);
+    if(responses.length){
+      const ids=new Set(responses.map(el=>threadId(el.getAttribute('data-response-annotation-conversation'))));
+      return ids.size===1?[...ids][0]:null;
+    }
+    const roots=[...document.querySelectorAll('[data-codex-usage-thread]')].filter(el=>visible(el)||[...el.children].some(visible));
+    if(roots.length){
+      const ids=new Set(roots.map(el=>threadId(el.getAttribute('data-codex-usage-thread'))));
+      return ids.size===1?[...ids][0]:null;
+    }
     const m = `${location.pathname}${location.hash}`.match(/\/(?:local|threads|thread)\/([0-9a-f-]{36})(?:[/?#]|$)/i);
-    if (m) return m[1];
-    const portals = [...document.querySelectorAll('[data-above-composer-conversation-id]')];
-    const portal = portals.find(visible);
-    return portal?.getAttribute('data-above-composer-conversation-id') ?? document.querySelector('[data-codex-usage-thread]')?.getAttribute('data-codex-usage-thread') ?? null;
+    return threadId(m?.[1]);
   }
   function injectStyle() {
     if (document.getElementById('codex-usage-ui-style')) return;
@@ -317,13 +342,14 @@
     else if(event.key==='Escape' && tooltip && !tooltip.hidden)hideQuota();
   }
   function renderStrip() {
-    const composer = [...document.querySelectorAll('[data-thread-find-composer]')].find(visible);
+    const composer = activeComposer();
     if (!composer) { strip?.remove();return; }
     if (!strip) { strip = element('div','cu-strip');strip.setAttribute('aria-label','当前对话用量统计');strip.setAttribute('data-markdown-copy','exclude'); }
     const mount=composer.querySelector('[data-codex-usage-strip-slot]') ?? composer;
     alignComposerFooter(composer);
     if (strip.parentNode !== mount) mount.append(strip);
-    if (!snapshot?.available) {
+    strip.dataset.cuThread=currentId??'';
+    if (!snapshot?.available || snapshot.threadId!==currentId) {
       setText(strip, currentId ? '用量统计 · 等待本地会话数据' : '用量统计 · 开始对话后显示');return;
     }
     const last = snapshot.turns?.at(-1);
@@ -347,36 +373,39 @@
     footer.classList.add('cu-footer');adjustedFooters.add(footer);
   }
   function onResize() {
-    const composer=[...document.querySelectorAll('[data-thread-find-composer]')].find(visible);
+    const composer=activeComposer();
     if(composer)alignComposerFooter(composer,true);
     alignRenderedMetrics();
     positionTooltip();positionMetricPanel();
   }
   function renderTurns() {
-    byId.clear();for(const t of snapshot?.turns??[])byId.set(t.id,t);
+    byId.clear();for(const t of snapshot?.threadId===currentId?snapshot.turns??[]:[])byId.set(t.id,t);
     // 官方入口和加载器共用浏览器缓存时，回复组件可能暂时没有增强属性。
     // 同时识别原生搜索键，避免尾栏完全依赖定制组件的挂载标记。
-    const roots=[...document.querySelectorAll('[data-codex-usage-turn],[data-content-search-turn-key]')],seen=new Set();
-    for(const actions of document.querySelectorAll('[data-response-annotation-target] > .turn-action-controls')){
+    const roots=[...document.querySelectorAll('[data-codex-usage-turn],[data-content-search-turn-key]')],seen=new Set(),mounts=new Set(),mounted=new Set();
+    for(const actions of document.querySelectorAll('[data-response-annotation-target] .turn-action-controls')){
       actions.classList.add('cu-action-row');adjustedActionRows.add(actions);
     }
     for(const root of roots.reverse()){
-      const actions=[...root.querySelectorAll('[data-response-annotation-target] > .turn-action-controls')].at(-1)??root.querySelector('.actions.turn-action-controls');
-      const thread=root.getAttribute('data-codex-usage-thread')??currentId;
+      const actions=[...root.querySelectorAll('[data-response-annotation-target] .turn-action-controls')].filter(visible).at(-1)??[...root.querySelectorAll('.actions.turn-action-controls')].find(visible);
+      const owner=actions?.closest('[data-response-annotation-conversation]');
+      const thread=owner?.getAttribute('data-response-annotation-conversation')??root.getAttribute('data-codex-usage-thread')??currentId;
       const key=root.getAttribute('data-content-search-turn-key')??'';
-      const candidates=[root.getAttribute('data-codex-usage-turn'),key,
-        ...key.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi)??[],...key.split(/[^\w-]+/)];
+      const candidates=[key,...key.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi)??[],
+        ...key.split(/[^\w-]+/),root.getAttribute('data-codex-usage-turn')];
       const id=thread===currentId?candidates.find(value=>byId.has(value)):null;
       let footer=turnFooters.get(root);
       if(!footer?.isConnected)footer=null;
       const turn=thread===currentId?byId.get(id):null;
-      if(!turn?.completed || seen.has(id) || !actions && !root.hasAttribute('data-codex-usage-turn')){
+      const contentVisible=actions||visible(root)||[...root.children].some(visible);
+      if(!turn?.completed || seen.has(id) || !contentVisible || (actions&&mounts.has(actions)) || (!actions&&!root.hasAttribute('data-codex-usage-turn'))){
         if(footer?.contains(panelAnchor))closeMetricPanel();footer?.remove();turnFooters.delete(root);continue;
       }
       seen.add(id);
       const mount=actions??root.querySelector('[data-codex-usage-turn-slot]')??root;
       if(!footer){footer=element('div','cu-turn');footer.setAttribute('data-markdown-copy','exclude');turnFooters.set(root,footer);}
       const moved=footer.parentNode!==mount;if(moved)mount.append(footer);
+      mounted.add(footer);mounts.add(mount);footer.dataset.cuThread=currentId;footer.dataset.cuTurn=id;
       footer.classList.toggle('cu-turn-inline',!!actions);
       if(actions){actions.classList.add('cu-action-row');adjustedActionRows.add(actions);}
       updateMetrics(footer,[
@@ -385,6 +414,9 @@
         {key:'speed',kind:'session',turnId:id,text:speedLabel(turn)}
       ]);
       if(moved)alignMetrics(footer);
+    }
+    for(const footer of document.querySelectorAll('.cu-turn'))if(!mounted.has(footer)){
+      if(footer.contains(panelAnchor))closeMetricPanel();footer.remove();
     }
   }
   function svgCircle(radius, className) {
@@ -476,21 +508,25 @@
     busy=true;
     try {
       const next=await ipcRenderer.invoke(CHANNEL,{threadId:id});
-      if(!stopped && id===getThreadId()){snapshot=next;render();}
+      if(!stopped && id===currentId && id===getThreadId() && next.threadId===id){snapshot=next;render();}
     } catch (error) { console.warn('[CodexUsageUI]',String(error)); }
     finally {busy=false;if(pending){pending=false;void refresh();}}
   }
+  function onNavigation() { void refresh(); }
   function start() {
     if(stopped || !document.body)return;
     document.documentElement.dataset.cuUi='ready';
     const observer=new MutationObserver(records=>{
       if(records.every(r=>r.target.nodeType===1 && r.target.closest?.('.cu-strip,.cu-turn,.cu-ring,.cu-tooltip,.cu-panel,#codex-usage-ui-style')))return;
+      if(getThreadId()!==currentId){void refresh();return;}
       if(timer)return;
-      timer=setTimeout(()=>{timer=null;if(getThreadId()!==currentId)void refresh();else render();},180);
+      timer=setTimeout(()=>{timer=null;render();},180);
     });
     activeObserver=observer;
-    observer.observe(document.body,{childList:true,subtree:true});
+    observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['data-above-composer-conversation-id','data-codex-usage-thread','data-codex-usage-turn','data-content-search-turn-key','data-response-annotation-conversation','aria-hidden','hidden','inert']});
     window.addEventListener('resize',onResize);
+    window.addEventListener('popstate',onNavigation);
+    window.addEventListener('hashchange',onNavigation);
     document.addEventListener('pointerdown',onOutsidePointer,true);
     document.addEventListener('keydown',onPanelKeydown,true);
     document.addEventListener('scroll',positionMetricPanel,true);void refresh();
