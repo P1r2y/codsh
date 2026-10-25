@@ -102,7 +102,7 @@
       .cu-tooltip[data-state=open],.cu-panel[data-state=open]{opacity:1;transform:none}.cu-tooltip[hidden],.cu-panel[hidden]{display:none}.cu-tooltip[data-state=closed],.cu-panel[data-state=closed]{pointer-events:none}
       .cu-tooltip strong,.cu-panel strong{font:inherit;font-weight:600}.cu-tooltip p{margin:8px 0 0}.cu-muted,.cu-note{color:var(--color-text-secondary,#999)}.cu-tooltip .cu-muted,.cu-note{font-size:var(--text-sm,12px)}.cu-tooltip .cu-quota-detail+.cu-quota-detail{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:12px;padding-top:12px}
       .cu-panel-header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding-bottom:12px;margin-bottom:10px;border-bottom:1px solid var(--color-border-overlay,#ffffff26)}.cu-panel-heading{display:flex;align-items:center;gap:8px}.cu-panel-total{white-space:nowrap}.cu-stat-row{display:flex;align-items:baseline;justify-content:space-between;gap:24px;padding:4px 0}.cu-stat-label{color:var(--color-text-secondary,#999)}.cu-stat-value{text-align:right;overflow-wrap:anywhere}.cu-note{margin:10px 0 0;line-height:18px}.cu-context-track{height:5px;border-radius:99px;background:var(--color-background-primary-ghost-hover,#ffffff12);overflow:hidden;margin:4px 0 12px}.cu-context-fill{display:flex;height:100%;border-radius:inherit;overflow:hidden;transition:width .25s var(--ease-out,ease-out)}
-      .cu-context-segment{display:block;flex:0 0 auto;height:100%;background:var(--cu-context-color);transition:width .25s var(--ease-out,ease-out)}.cu-context-uncached{--cu-context-color:var(--purple-400,#a78bfa)}.cu-context-cached{--cu-context-color:var(--blue-400,#60a5fa)}.cu-context-output{--cu-context-color:var(--green-400,#4ade80)}.cu-stat-row[data-cu-category]>.cu-stat-label{display:inline-flex;align-items:center;gap:8px}.cu-context-dot{display:inline-block;flex-shrink:0;width:8px;height:8px;border-radius:2px;background:var(--cu-context-color)}
+      .cu-context-segment{display:block;flex:0 0 auto;height:100%;background:var(--cu-context-color);transition:width .25s var(--ease-out,ease-out)}.cu-context-uncached{--cu-context-color:var(--purple-400,#a78bfa)}.cu-context-cached{--cu-context-color:var(--blue-400,#60a5fa)}.cu-context-output{--cu-context-color:var(--green-400,#4ade80)}.cu-context-unknown{--cu-context-color:var(--color-text-tertiary,#878b93)}.cu-stat-row[data-cu-category]>.cu-stat-label{display:inline-flex;align-items:center;gap:8px}.cu-context-dot{display:inline-block;flex-shrink:0;width:8px;height:8px;border-radius:2px;background:var(--cu-context-color)}
       .cu-token-panel{font-size:var(--text-sm,12px);padding:14px}.cu-token-panel .cu-panel-header{gap:16px;padding-bottom:10px;margin-bottom:8px}.cu-model-views{display:flex;gap:4px;overflow-x:auto;max-width:100%;padding:0 0 8px;scrollbar-width:thin}.cu-model-view,.cu-model-summary{border:0;border-radius:var(--radius-md,6px);background:transparent;color:var(--color-text-secondary,#999);font:inherit;line-height:20px;cursor:pointer;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}.cu-model-view{flex:0 0 auto;padding:2px 7px;white-space:nowrap}.cu-model-view:hover,.cu-model-summary:hover,.cu-model-view[aria-pressed=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-model-view:focus-visible,.cu-model-summary:focus-visible{outline:2px solid var(--color-ring,#79acfe);outline-offset:-2px}.cu-model-list{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:8px;padding-top:6px}.cu-model-summary{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:4px 6px;text-align:left}.cu-model-summary>span:first-child{min-width:0;overflow-wrap:anywhere}.cu-model-summary>span:last-child{white-space:nowrap;color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}
       @media(max-width:620px){.cu-strip{gap:2px 4px}.cu-turn{gap:2px}}
       @media(prefers-reduced-motion:reduce){.cu-metric,.cu-ring button,.cu-ring circle,.cu-tooltip,.cu-panel,.cu-context-fill,.cu-context-segment,.cu-model-view,.cu-model-summary{transition:none}}
@@ -204,11 +204,17 @@
   }
   function usageParts(usage,compact=false) {
     const cached=usage?Math.min(usage.input_tokens,usage.cached_input_tokens):null;
-    return [
+    const parts=[
       {key:'uncached',label:'未缓存输入',amount:usage?usage.input_tokens-cached:null},
       {key:'cached',label:'缓存输入',amount:cached},
       {key:'output',label:compact?'输出':'输出（含推理）',amount:usage?.output_tokens}
     ];
+    const missing=usage?Math.max(0,usage.total_tokens-usage.input_tokens-usage.output_tokens):0;
+    if(missing>0){
+      for(const part of parts)if(part.amount===0)part.amount=null;
+      parts.push({key:'unknown',label:'未分类',amount:missing});
+    }
+    return parts;
   }
   function usageTrack(parts,percent=null) {
     const track=element('div',`cu-context-track${percent===null?' cu-token-track':''}`),fill=element('div','cu-context-fill');
@@ -226,7 +232,7 @@
     track.append(fill);return track;
   }
   function usageRow(part) {
-    const row=statRow(part.label,tokens(part.amount));row.dataset.cuCategory=part.key;row.classList.add(`cu-context-${part.key}`);
+    const row=statRow(part.label,part.amount==null?'—':tokens(part.amount));row.dataset.cuCategory=part.key;row.classList.add(`cu-context-${part.key}`);
     const dot=element('span','cu-context-dot');dot.setAttribute('aria-hidden','true');row.firstElementChild.prepend(dot);return row;
   }
   function selectTokenModel(model) {
@@ -297,7 +303,12 @@
       if(previous&&next){
         previous.setAttribute('aria-label',next.getAttribute('aria-label'));
         previous.firstElementChild.style.width=next.firstElementChild.style.width;
-        [...previous.firstElementChild.children].forEach((segment,i)=>{segment.style.width=next.firstElementChild.children[i].style.width;});
+        const fill=previous.firstElementChild,segments=[...fill.children],keys=new Set();
+        for(const segment of [...next.firstElementChild.children]){
+          const key=segment.dataset.cuCategory,existing=segments.find(e=>e.dataset.cuCategory===key);
+          keys.add(key);if(existing){existing.style.width=segment.style.width;fill.append(existing);}else fill.append(segment);
+        }
+        for(const segment of segments)if(!keys.has(segment.dataset.cuCategory))segment.remove();
         next.replaceWith(previous);
       }
       metricPanel.replaceChildren(...nodes);metricPanel.dataset.content=signature;
