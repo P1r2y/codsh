@@ -257,6 +257,18 @@ async function selfTest() {
     }
     const sessionPanel=await clickMetric('.cu-strip [data-cu-kind=session]','session');
     const tokenPanel=await clickMetric('.cu-strip [data-cu-kind=tokens]','tokens');
+    const tokenState=()=>win.webContents.executeJavaScript(`(()=>{const p=document.querySelector('.cu-panel'),track=p.querySelector('.cu-token-track'),fill=track?.firstElementChild;return {font:getComputedStyle(p).fontSize,total:p.querySelector('.cu-panel-total')?.textContent,selected:p.querySelector('.cu-model-view[aria-pressed=true]')?.dataset.cuModel,segments:[...(fill?.children??[])].map(e=>({kind:e.dataset.cuCategory,color:getComputedStyle(e).backgroundColor,ratio:fill.getBoundingClientRect().width?e.getBoundingClientRect().width/fill.getBoundingClientRect().width:0,transition:getComputedStyle(e).transitionDuration})),legend:[...p.querySelectorAll('.cu-stat-row[data-cu-category]')].map(e=>({kind:e.dataset.cuCategory,color:getComputedStyle(e.querySelector('.cu-context-dot')).backgroundColor})),models:[...p.querySelectorAll('.cu-model-summary')].map(e=>e.dataset.cuModel)}})()`);
+    const tokenOverview=await tokenState(),modelChoice=fixture.snapshot.models?.[0];
+    await win.webContents.executeJavaScript(`window.fixtureTokenTrack=document.querySelector('.cu-token-track');[...document.querySelectorAll('.cu-model-summary')].find(e=>e.dataset.cuModel===${JSON.stringify(modelChoice?.model??'')})?.click()`);
+    await delay(300);
+    await win.webContents.executeJavaScript(`document.querySelector('.cu-panel').getAnimations({subtree:true}).forEach(a=>a.finish())`);
+    const modelPanel=await tokenState();
+    fs.writeFileSync(output+'.model.png',(await win.webContents.capturePage()).toPNG());
+    await delay(1900);
+    const retainedModel=await tokenState();
+    const stableTokenTrack=await win.webContents.executeJavaScript(`window.fixtureTokenTrack===document.querySelector('.cu-token-track')`);
+    await win.webContents.executeJavaScript(`document.querySelector('.cu-model-view[data-cu-model="*"]').click()`);await delay(300);
+    const restoredOverview=await tokenState();
     const contextPanel=await clickMetric('.cu-strip [data-cu-kind=context]','context');
     const contextColors=await win.webContents.executeJavaScript(`(()=>{const track=document.querySelector('.cu-context-track'),fill=document.querySelector('.cu-context-fill');return {fillRatio:fill.getBoundingClientRect().width/track.getBoundingClientRect().width,segments:[...fill.children].map(e=>({kind:e.dataset.cuCategory,color:getComputedStyle(e).backgroundColor,ratio:e.getBoundingClientRect().width/fill.getBoundingClientRect().width})),legend:[...document.querySelectorAll('.cu-stat-row[data-cu-category]')].map(e=>({kind:e.dataset.cuCategory,color:getComputedStyle(e.querySelector('.cu-context-dot')).backgroundColor}))}})()`);
     const replyPanel=await clickMetric('.cu-turn [data-cu-kind=tokens]','reply');
@@ -287,15 +299,17 @@ async function selfTest() {
       hover:hoverState.color!=='rgba(0, 0, 0, 0)'&&!hoverState.opened&&hoverState.titles===0,
       session:sessionPanel.visible&&sessionPanel.opacity==='1'&&sessionPanel.text.includes('会话统计')&&sessionPanel.text.includes('暂无数据')&&sessionPanel.transition.includes('0.16s'),
       tokens:tokenPanel.visible&&tokenPanel.text.includes('909,000 tok')&&tokenPanel.text.includes('100,000 tok')&&tokenPanel.text.includes('800,000 tok'),
+      tokenColors:tokenOverview.font==='12px'&&tokenOverview.segments.length===3&&new Set(tokenOverview.segments.map(s=>s.color)).size===3&&tokenOverview.segments.every(s=>tokenOverview.legend.some(l=>l.kind===s.kind&&l.color===s.color))&&Math.abs(tokenOverview.segments.find(s=>s.kind==='cached').ratio-800000/909000)<.002,
+      models:tokenOverview.models.length===2&&modelPanel.selected===modelChoice?.model&&modelPanel.total===`${modelChoice?.usage.total_tokens.toLocaleString('en-US')} tok`&&modelPanel.models.length===0&&Math.abs(modelPanel.segments.find(s=>s.kind==='cached').ratio-modelChoice.usage.cached_input_tokens/modelChoice.usage.total_tokens)<.002&&retainedModel.selected===modelPanel.selected&&stableTokenTrack&&modelPanel.segments.every(s=>s.transition.includes('0.25s'))&&restoredOverview.selected==='*'&&restoredOverview.total==='909,000 tok'&&restoredOverview.models.length===2,
       context:contextPanel.visible&&contextPanel.text.includes('上下文已用')&&contextPanel.text.includes('475,000 tok')&&contextColors.segments.length===3&&new Set(contextColors.segments.map(s=>s.color)).size===3&&contextColors.segments.every(s=>contextColors.legend.some(l=>l.kind===s.kind&&l.color===s.color))&&Math.abs(contextColors.fillRatio-46000/475000)<.001&&Math.abs(contextColors.segments.find(s=>s.kind==='cached').ratio-40000/46000)<.002,
       cleanPanels:!sessionPanel.text.includes('生成估速按已记录')&&!contextPanel.text.includes('系统提示词、工具定义'),
-      replyDetails:replyPanel.visible&&replyPanel.text.includes('本轮用量')&&replyPanel.text.includes('完成时间')&&replyPanel.text.includes('400,000 tok'),
+      replyDetails:replyPanel.visible&&replyPanel.text.includes('本轮用量')&&replyPanel.text.includes('完成时间')&&replyPanel.text.includes('404,000 tok')&&replyPanel.text.includes('350,000 tok')&&replyPanel.text.includes('50,000 tok'),
       dismissal:!escapeState.visible&&!outsideState.visible,
       quota:report.ring&&tooltipState.visible&&tooltipState.text.includes('56%')&&!/Codex 额度|外环：|来源：/.test(tooltipState.text)&&tooltipState.radius==='16px'&&tooltipState.blur==='blur(8px)',
       live:liveState.live?.includes('62.5')&&liveState.footers===1&&liveState.stableAnchor&&livePanel.visible&&livePanel.text.includes('910,000 tok')&&!finishedState.live&&finishedState.footers===2,
       lifecycle:disabledState.nodes===0&&disabledState.nativeInset===24&&!disabledState.adjusted&&disabledState.actions===0&&enabledState.ring&&enabledState.footers===2
     };
-    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,...report,hoverState,sessionPanel,tokenPanel,contextPanel,contextColors,replyPanel,escapeState,outsideState,tooltipState,liveState,livePanel,finishedState,disabledState,enabledState});
+    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,contextPanel,contextColors,replyPanel,escapeState,outsideState,tooltipState,liveState,livePanel,finishedState,disabledState,enabledState});
     win.destroy(); app.exit(0);
   } catch (e) { write({ok:false,error:String(e),stack:e.stack}); app.exit(1); }
 }

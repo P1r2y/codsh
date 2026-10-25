@@ -15,6 +15,24 @@ function usage(v) {
 }
 function add(a, b) { for (const k of FIELDS) a[k] += b[k]; return a; }
 function difference(a, b) { return Object.fromEntries(FIELDS.map(k => [k, Math.max(0, a[k] - b[k])])) }
+const modelName = value => typeof value === 'string' && value.trim() ? value.trim() : null;
+function addModel(groups, model, value) {
+  if (!groups.has(model)) groups.set(model, emptyUsage());
+  add(groups.get(model), value);
+}
+function includeUnassigned(groups, total) {
+  const counted = [...groups.values()].reduce((sum, u) => add(sum, u), emptyUsage());
+  const missing = difference(total, counted);
+  missing.cached_input_tokens = Math.min(missing.input_tokens, missing.cached_input_tokens);
+  missing.reasoning_output_tokens = Math.min(missing.output_tokens, missing.reasoning_output_tokens);
+  missing.total_tokens = missing.input_tokens + missing.output_tokens;
+  if (missing.total_tokens > 0) addModel(groups, null, missing);
+}
+function modelEntries(groups) {
+  return [...groups].map(([model, value]) => ({model, usage:{...value},
+    cacheHitPercent:value.input_tokens > 0 ? clamp(100*value.cached_input_tokens/value.input_tokens) : null}))
+    .sort((a,b) => (a.model === null)-(b.model === null) || (a.model ?? '').localeCompare(b.model ?? ''));
+}
 function unionDuration(intervals) {
   let end = -Infinity, total = 0;
   for (const [a, b] of [...intervals].sort((x, y) => x[0] - y[0])) {
@@ -64,14 +82,14 @@ class UsageAccumulator {
   constructor() {
     this.total = emptyUsage(); this.hasTotal = false; this.turns = new Map(); this.currentId = null;
     this.lastUsage = null; this.contextWindow = null; this.limits = null; this.model = null;
-    this.ids = new Set(); this.meta = null;this.order=0;
+    this.ids = new Set(); this.meta = null;this.order=0;this.turnModels=new Map();
   }
   turn(id) {
     if (!id) return null;
     if (!this.turns.has(id)) this.turns.set(id, {id, start:null, end:null, completed:false,
-      status:'进行中', base:{...this.total}, usage:emptyUsage(), hasRecords:false,
+      status:'进行中', usage:emptyUsage(), hasRecords:false,
       requests:0, recordIds:new Set(), itemIds:new Set(), tools:0,
-      responses:[],legacyResponses:[],modelItems:[],lastActivity:null,endInferred:false});
+      responses:[],legacyResponses:[],modelItems:[],lastActivity:null,endInferred:false,model:this.turnModels.get(id)??this.model});
     return this.turns.get(id);
   }
   feed(event) {
@@ -80,14 +98,23 @@ class UsageAccumulator {
     if (event.type === 'session_meta') {
       this.meta = {id:p.id, originator:p.originator, source:p.source}; return;
     }
-    if (event.type === 'turn_context') { this.model = p.model ?? this.model; return; }
+    if (event.type === 'turn_context') {
+      this.model = modelName(p.model) ?? this.model;
+      const id = p.turn_id ?? this.currentId;
+      if (id) this.turnModels.set(id, this.model);
+      const t = this.turns.get(id);
+      if (t) t.model = this.model;
+      return;
+    }
     if (event.type === 'token_usage_record') {
       const t = this.turn(p.turn_id ?? this.currentId), u = usage(p.usage);
       const key = p.response_id ?? `ordinal:${event.ordinal ?? event.timestamp}`;
-      if (!t || !u || t.recordIds.has(key)) return;
-      t.recordIds.add(key); if (!t.hasRecords) t.usage = emptyUsage();
+      if (!t || !u || t.recordIds.has(key) || (p.response_id && this.ids.has(p.response_id))) return;
+      t.recordIds.add(key); if (!t.hasRecords) { t.usage = emptyUsage(); t.requests = 0; }
+      if (p.response_id) this.ids.add(p.response_id);
       t.hasRecords = true; add(t.usage, u); t.requests++;
-      t.responses.push({order,usage:u});
+      t.responses.push({order,usage:u,model:modelName(p.model) ?? t.model});
+      this.hasTotal = true;
       if(Number.isFinite(stamp))t.lastActivity=stamp;
       const cumulative = usage(p.thread_token_usage);
       if (cumulative) { this.total = cumulative; this.hasTotal = true; }
@@ -117,8 +144,12 @@ class UsageAccumulator {
         this.total = cumulative; this.hasTotal = true;
         if (t && !t.hasRecords && changed) {
           const delta=difference(cumulative,prior);
-          t.usage = difference(cumulative, t.base); t.requests++;
-          t.legacyResponses.push({order,usage:usage(p.info?.last_token_usage)??delta});
+          delta.total_tokens=delta.input_tokens+delta.output_tokens;
+          if(delta.total_tokens>0){
+            add(t.usage,delta);t.requests++;
+            t.legacyResponses.push({order,usage:usage(p.info?.last_token_usage)??delta,countedUsage:delta,
+              model:modelName(p.model) ?? modelName(p.info?.model) ?? t.model});
+          }
         }
       }
       this.lastUsage = usage(p.info?.last_token_usage) ?? this.lastUsage;
@@ -141,19 +172,28 @@ class UsageAccumulator {
     }
   }
   snapshot(now = Date.now()) {
+    const groups = new Map();
     const turns = [...this.turns.values()].map(t => {
+      const models = new Map();
+      for (const record of t.hasRecords ? t.responses : t.legacyResponses)
+        addModel(models, record.model, record.countedUsage ?? record.usage);
+      includeUnassigned(models, t.usage);
+      for (const [model, value] of models) addModel(groups, model, value);
       const duration = t.durationMs ?? (Number.isFinite(t.start) ? Math.max(0,(t.end ?? now)-t.start) : null);
       const timing=generationTiming(t),generatedMs=timing.ms;
       return {id:t.id, completed:t.completed, status:t.status, startedAt:t.start, completedAt:t.end,endInferred:t.endInferred,
-        usage:{...t.usage}, cacheHitPercent:t.usage.input_tokens > 0 ? clamp(100*t.usage.cached_input_tokens/t.usage.input_tokens) : null,
+        usage:{...t.usage}, models:modelEntries(models), cacheHitPercent:t.usage.input_tokens > 0 ? clamp(100*t.usage.cached_input_tokens/t.usage.input_tokens) : null,
         requests:t.requests, tools:t.tools, durationMs:duration,
         averageTps:duration > 0 && t.usage.output_tokens > 0 ? t.usage.output_tokens*1000/duration : null,
         // 本机只有项目生成区间，无法覆盖每个请求的完整解码计时，必须标记为估速。
         estimatedGenerationTps:timing.complete&&generatedMs >= 50 && t.usage.output_tokens > 0 ? t.usage.output_tokens*1000/generatedMs : null,
         generatedMs,generationTimingComplete:timing.complete, timeToFirstTokenMs:t.timeToFirstTokenMs ?? null};
     });
-    return {model:this.model, available:this.hasTotal, total:{...this.total}, turnCount:turns.length,
-      requests:turns.reduce((n,t)=>n+t.requests,0), cacheHitPercent:this.total.input_tokens > 0 ? clamp(100*this.total.cached_input_tokens/this.total.input_tokens) : null,
+    // 已记录的响应不会被较旧的累计快照扣减；无法归属的历史计数单列。
+    includeUnassigned(groups, this.total);
+    const total = [...groups.values()].reduce((sum, u) => add(sum, u), emptyUsage());
+    return {model:this.model, models:modelEntries(groups), available:this.hasTotal, total, turnCount:turns.length,
+      requests:turns.reduce((n,t)=>n+t.requests,0), cacheHitPercent:total.input_tokens > 0 ? clamp(100*total.cached_input_tokens/total.input_tokens) : null,
       contextPercent:this.contextWindow > 0 && this.lastUsage ? clamp(100*this.lastUsage.total_tokens/this.contextWindow) : null,
       contextWindow:this.contextWindow, lastUsage:this.lastUsage, turns, limits:this.limits};
   }
