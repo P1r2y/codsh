@@ -190,6 +190,13 @@ def build(source, destination):
     shutil.copy2(ROOT/'plugin/plugin.json',plugin/'plugin.json')
     for name in ['usage-data.cjs','usage-host.cjs']:shutil.copy2(ROOT/'src'/name,plugin/'lib'/name)
     shutil.copy2(ROOT/'src/usage-preload.cjs',plugin/'ui/usage-preload.cjs')
+    # 只从本机原安装包复制透明任务栏图标，不把原客户端素材放入源码发布包。
+    icon_dir=plugin/'assets/app-icons'
+    for variant in ['lightunplated','unplated']:
+        icon=source.parent/'assets'/f'Square44x44Logo.targetsize-32_altform-{variant}.png'
+        if icon.is_file():
+            icon_dir.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(icon,icon_dir/icon.name)
     settings=destination/'plugins.json'
     if not settings.exists():settings.write_text(json.dumps({'loaderVersion':1,'plugins':{'codex-usage':{'enabled':True}}},indent=2),encoding='utf-8')
     print('构建定制界面……',flush=True)

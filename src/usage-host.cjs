@@ -126,6 +126,23 @@ class RolloutStore {
 
 function register({isEnabled=()=>true}={}) {
   const {ipcMain,app,BrowserWindow,webContents} = require('electron'), store = new RolloutStore();
+  // 使用商店安装包的原始透明图标，随 Windows 任务栏主题选择黑色或白色版本。
+  const {nativeTheme}=require('electron');let iconPath=null;
+  const applyWindowIcon=win=>{
+    if(win.isDestroyed())return;
+    const dark=nativeTheme.shouldUseDarkColorsForSystemIntegratedUI??nativeTheme.shouldUseDarkColors;
+    const original=path.join(__dirname,'..','assets','app-icons',`Square44x44Logo.targetsize-32_altform-${dark?'unplated':'lightunplated'}.png`);
+    const file=[original,path.join(process.resourcesPath,'codex.ico'),
+      path.join(os.homedir(),'AppData','Local','Programs','OpenAI','Codex','codex.ico')].find(file=>fs.existsSync(file));
+    if(file){win.setIcon(file);iconPath=file;}
+  };
+  if(process.platform==='win32'){
+    app.on('browser-window-created',(_event,win)=>{
+      applyWindowIcon(win);win.once('ready-to-show',()=>applyWindowIcon(win));
+    });
+    app.whenReady().then(()=>BrowserWindow.getAllWindows().forEach(applyWindowIcon));
+    nativeTheme.on('updated',()=>setImmediate(()=>BrowserWindow.getAllWindows().forEach(applyWindowIcon)));
+  }
   ipcMain.handle(CHANNEL, async(event, request)=>{
     const url = event.senderFrame?.url ?? '';
     if (!url.startsWith('app://') && !url.startsWith('file://')) throw new Error('界面来源不受支持');
@@ -139,11 +156,15 @@ function register({isEnabled=()=>true}={}) {
     app.whenReady().then(async()=>{
       try {
         const id=process.env.CODEX_USAGE_UI_PROBE_THREAD_ID;
-        let navigated=!id, report=[], screenshotTarget=null;
+        let navigated=!id, report=[], screenshotTarget=null,nativeOnlyApplied=false;
         const deadline=Date.now()+50000;
         while(Date.now()<deadline){
           report=[];
           for(const contents of webContents.getAllWebContents().filter(w=>!w.isDestroyed() && w.getURL().startsWith('app://'))){
+            if(process.env.CODEX_USAGE_UI_PROBE_NATIVE_ONLY && !nativeOnlyApplied){
+              nativeOnlyApplied=await contents.executeJavaScript(`(()=>{const roots=[...document.querySelectorAll('[data-content-search-turn-key]')];if(!roots.length)return false;for(const root of roots){root.removeAttribute('data-codex-usage-turn');root.removeAttribute('data-codex-usage-thread');root.querySelector('.cu-turn')?.remove();}return true})()`);
+              if(nativeOnlyApplied)await new Promise(resolve=>setTimeout(resolve,500));
+            }
             const state=await contents.executeJavaScript(`(()=>{
               const strip=document.querySelector('.cu-strip'),rect=strip?.getBoundingClientRect(),footer=strip?.closest('[data-thread-scroll-footer]');
               const geometry=(${measureMetricGeometry.toString()})(strip);
@@ -179,7 +200,8 @@ function register({isEnabled=()=>true}={}) {
             fs.writeFileSync(output+'.'+kind+'.png',(await screenshotTarget.capturePage()).toPNG());
           }
         }
-        fs.writeFileSync(output,JSON.stringify({ok:report.some(r=>r.ring) && (!id || report.some(r=>r.composer && r.footers>0 && r.strip?.includes('tok/s'))) && interactionChecks.every(r=>r.visible&&r.opacity==='1'),windows:report,interactionChecks},null,2));
+        const nativeTurnKeys=screenshotTarget?await screenshotTarget.executeJavaScript(`({keys:[...document.querySelectorAll('[data-content-search-turn-key]')].map(e=>e.getAttribute('data-content-search-turn-key')),customHooks:document.querySelectorAll('[data-codex-usage-turn]').length,footers:[...document.querySelectorAll('.cu-turn')].map(e=>{const root=e.closest('[data-content-search-turn-key]');return {key:root?.getAttribute('data-content-search-turn-key'),enhanced:root?.hasAttribute('data-codex-usage-turn'),matchedTurn:e.querySelector('[data-cu-turn]')?.dataset.cuTurn}})})`):null;
+        fs.writeFileSync(output,JSON.stringify({ok:report.some(r=>r.ring) && (!id || report.some(r=>r.composer && r.footers>0 && r.strip?.includes('tok/s'))) && interactionChecks.every(r=>r.visible&&r.opacity==='1'),windows:report,interactionChecks,nativeOnlyApplied,nativeTurnKeys,iconPath},null,2));
       }catch(e){fs.writeFileSync(output,JSON.stringify({ok:false,error:String(e)}));}
       app.exit(0);
     });

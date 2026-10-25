@@ -8,6 +8,7 @@
   let strip = null, ring = null, tooltip = null, ringButton = null;
   let metricPanel=null,panelAnchor=null,panelCloseTimer=null,quotaHideTimer=null,quotaCloseTimer=null;
   const byId = new Map();
+  const turnFooters = new WeakMap();
   const adjustedFooters = new Set();
   const adjustedActionRows = new Set();
   const textMeasure = document.createElement('canvas').getContext('2d',{willReadFrequently:true});
@@ -298,18 +299,28 @@
   }
   function renderTurns() {
     byId.clear();for(const t of snapshot?.turns??[])byId.set(t.id,t);
-    const roots=[...document.querySelectorAll('[data-codex-usage-turn]')],seen=new Set();
+    // 官方入口和加载器共用浏览器缓存时，回复组件可能暂时没有增强属性。
+    // 同时识别原生搜索键，避免尾栏完全依赖定制组件的挂载标记。
+    const roots=[...document.querySelectorAll('[data-codex-usage-turn],[data-content-search-turn-key]')],seen=new Set();
+    for(const actions of document.querySelectorAll('[data-response-annotation-target] > .turn-action-controls')){
+      actions.classList.add('cu-action-row');adjustedActionRows.add(actions);
+    }
     for(const root of roots.reverse()){
-      const id=root.getAttribute('data-codex-usage-turn'),thread=root.getAttribute('data-codex-usage-thread');
-      let footer=root.querySelector('.cu-turn');
+      const actions=[...root.querySelectorAll('[data-response-annotation-target] > .turn-action-controls')].at(-1)??root.querySelector('.actions.turn-action-controls');
+      const thread=root.getAttribute('data-codex-usage-thread')??currentId;
+      const key=root.getAttribute('data-content-search-turn-key')??'';
+      const candidates=[root.getAttribute('data-codex-usage-turn'),key,
+        ...key.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi)??[],...key.split(/[^\w-]+/)];
+      const id=thread===currentId?candidates.find(value=>byId.has(value)):null;
+      let footer=turnFooters.get(root);
+      if(!footer?.isConnected)footer=null;
       const turn=thread===currentId?byId.get(id):null;
-      if(!turn?.completed || seen.has(id)){
-        if(footer?.contains(panelAnchor))closeMetricPanel();footer?.remove();continue;
+      if(!turn?.completed || seen.has(id) || !actions && !root.hasAttribute('data-codex-usage-turn')){
+        if(footer?.contains(panelAnchor))closeMetricPanel();footer?.remove();turnFooters.delete(root);continue;
       }
       seen.add(id);
-      const actions=[...root.querySelectorAll('[data-response-annotation-target] > .turn-action-controls')].at(-1)??root.querySelector('.actions.turn-action-controls');
       const mount=actions??root.querySelector('[data-codex-usage-turn-slot]')??root;
-      if(!footer){footer=element('div','cu-turn');footer.setAttribute('data-markdown-copy','exclude');}
+      if(!footer){footer=element('div','cu-turn');footer.setAttribute('data-markdown-copy','exclude');turnFooters.set(root,footer);}
       const moved=footer.parentNode!==mount;if(moved)mount.append(footer);
       footer.classList.toggle('cu-turn-inline',!!actions);
       if(actions){actions.classList.add('cu-action-row');adjustedActionRows.add(actions);}
