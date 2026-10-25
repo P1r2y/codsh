@@ -156,6 +156,15 @@
   function speedLabel(turn) {
     return turn?.estimatedGenerationTps != null ? `${Math.round(turn.estimatedGenerationTps)} tok/s` : turn?.averageTps != null ? `整轮 ${turn.averageTps.toFixed(1)} tok/s` : '速度 —';
   }
+  function statisticsFor(turns) {
+    const output=turns.reduce((n,t)=>n+(t.usage?.output_tokens??0),0);
+    const measured=turns.filter(t=>(t.usage?.output_tokens??0)>0);
+    const complete=measured.length>0&&measured.every(t=>t.estimatedGenerationTps!=null&&t.generatedMs>0);
+    const generatedMs=complete?measured.reduce((n,t)=>n+t.generatedMs,0):null;
+    const durationMs=turns.every(t=>t.durationMs!=null)?turns.reduce((n,t)=>n+t.durationMs,0):null;
+    return {generatedMs,durationMs,estimatedGenerationTps:generatedMs>0?output*1000/generatedMs:null,
+      averageTps:durationMs>0&&output>0?output*1000/durationMs:null};
+  }
   const tokens=n=>n==null?'暂无数据':`${Math.round(n).toLocaleString('en-US')} tok`;
   const completedDate=turn=>turn?.completedAt?new Date(turn.completedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}):null;
   function statRow(label,value) {
@@ -206,18 +215,18 @@
       nodes.push(statRow('模型窗口',tokens(snapshot.contextWindow)));
     }else{
       const active=kind==='live'?last:turn,turns=active?[active]:snapshot.turns??[];
-      const generated=turns.reduce((n,t)=>n+(t.generatedMs??0),0),duration=turns.reduce((n,t)=>n+(t.durationMs??0),0);
+      const statistics=statisticsFor(turns),generated=statistics.generatedMs,duration=statistics.durationMs;
       const firstTokens=turns.map(t=>t.timeToFirstTokenMs).filter(n=>n!=null);
-      const latest=active??last;
+      const generation=statistics.estimatedGenerationTps!=null;
       nodes.push(panelHeader(kind==='live'?'当前执行':turn?'本轮统计':'会话统计','speed'),
         statRow(active?'状态':'对话轮数',active?active.status:`${snapshot.turnCount} 轮`),
         statRow('模型请求',`${turns.reduce((n,t)=>n+t.requests,0)} 次`),
-        statRow('模型生成区间',generated?elapsed(generated):null),statRow('整轮耗时',duration?elapsed(duration):null),
+        statRow('模型生成区间',generated!=null?elapsed(generated):'暂无完整计时'),statRow('整轮耗时',duration!=null?elapsed(duration):null),
         statRow('工具调用',`${turns.reduce((n,t)=>n+t.tools,0)} 次`),
-        statRow('首 token 平均（TTFT）',firstTokens.length?elapsed(firstTokens.reduce((a,b)=>a+b,0)/firstTokens.length):null),
-        statRow(kind==='live'?'当前整轮平均':'生成速度（估算）',kind==='live'?`${latest?.averageTps?.toFixed(1)??'—'} tok/s`:speedLabel(latest)));
+        statRow(active?'首 token 等待（TTFT）':'每轮首 token 平均',firstTokens.length?elapsed(firstTokens.reduce((a,b)=>a+b,0)/firstTokens.length):null),
+        statRow(kind==='live'?'当前整轮平均':generation?'生成速度（估算）':'整轮平均速度',kind==='live'?`${statistics.averageTps?.toFixed(1)??'—'} tok/s`:speedLabel(statistics).replace(/^整轮 /,'')));
     }
-    if(completedDate(turn))nodes.push(statRow('完成时间',completedDate(turn)));
+    if(completedDate(turn))nodes.push(statRow(turn?.endInferred?'最后记录时间':'完成时间',completedDate(turn)));
     return nodes;
   }
   function renderMetricPanel() {
@@ -274,7 +283,7 @@
     const last = snapshot.turns?.at(-1);
     const running = last && !last.completed ? last : null;
     const items=[
-      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${speedLabel(last)}`},
+      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${speedLabel(statisticsFor(snapshot.turns??[]))}`},
       {key:'tokens',icon:'token',kind:'tokens',text:`${fmt(snapshot.total.total_tokens)} tok · 缓存命中 ${pct(snapshot.cacheHitPercent)}`},
       {key:'context',icon:'context',kind:'context',text:pct(snapshot.contextPercent)}
     ];
