@@ -1,20 +1,7 @@
 'use strict';
 
-const FIELDS = ['input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens', 'total_tokens'];
-const emptyUsage = () => Object.fromEntries(FIELDS.map(k => [k, 0]));
-const number = n => Number.isFinite(n) && n >= 0 ? n : null;
-const clamp = n => Math.min(100, Math.max(0, n));
+const { FIELDS, emptyUsage, number, clamp, usage, add, difference } = require('./usage-model.cjs');
 const time = v => typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : Date.parse(v);
-
-function usage(v) {
-  if (!v || number(v.input_tokens) === null || number(v.output_tokens) === null) return null;
-  const out = emptyUsage();
-  for (const k of FIELDS) out[k] = number(v[k]) ?? 0;
-  out.total_tokens = number(v.total_tokens) ?? out.input_tokens + out.output_tokens;
-  return out;
-}
-function add(a, b) { for (const k of FIELDS) a[k] += b[k]; return a; }
-function difference(a, b) { return Object.fromEntries(FIELDS.map(k => [k, Math.max(0, a[k] - b[k])])) }
 const modelName = value => typeof value === 'string' && value.trim() ? value.trim() : null;
 function addModel(groups, model, value) {
   if (!groups.has(model)) groups.set(model, emptyUsage());

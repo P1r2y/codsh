@@ -1,4 +1,4 @@
-"""从已安装客户端构建用户目录定制副本；不写入原版安装目录。"""
+"""安装 Codex 本地增强插件和最小加载入口。"""
 from __future__ import annotations
 import argparse
 import copy
@@ -12,10 +12,11 @@ import shutil
 import struct
 import subprocess
 import time
+import uuid
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT = Path(os.environ['LOCALAPPDATA']) / 'CodexUsageUI'
-VERSION = '26.1013.40934'
+VERSION = json.loads((ROOT/'plugin/plugin.json').read_text(encoding='utf-8'))['clientVersion']
 
 def read_header(p):
     with p.open('rb') as f:
@@ -46,53 +47,43 @@ def integrity(data):
     return {'algorithm':'SHA256','hash':hashlib.sha256(data).hexdigest(),
             'blockSize':block,'blocks':[hashlib.sha256(data[i:i+block]).hexdigest() for i in range(0,len(data),block)]}
 
-def patch_asar(source, target):
+def write_archive(source, target, changes):
+    """保留原条目，只在独立输出中添加或更新指定入口。"""
     header, offset = read_header(source)
-    version = json.loads(read_entry(source,header,offset,'package.json'))['version']
-    if version != VERSION:
-        raise RuntimeError(f'客户端版本 {version} 未适配；当前补丁只支持 {VERSION}')
-    changes = {}
-    early = '.vite/build/early-bootstrap.js'
-    old = read_entry(source,header,offset,early).decode('utf-8')
-    changes[early] = ("if(process.env.CODEX_USAGE_UI_SELF_TEST==='1'){require('./usage-host.cjs').selfTest()}else{require('./enhancement-loader.cjs').register();\n" + old + '\n}').encode()
-    preload = '.vite/build/preload.js'
-    changes[preload] = read_entry(source,header,offset,preload) + b'\n;' + (ROOT/'src/enhancement-preload.cjs').read_bytes()
-    turn = 'webview/assets/local-conversation-thread-6999d2419a30.js'
-    old = read_entry(source,header,offset,turn).decode('utf-8')
-    anchor = '"data-content-search-turn-key":H,children:Oe'
-    if old.count(anchor) != 1:
-        raise RuntimeError('回复组件入口不唯一，已停止构建')
-    old=old.replace(anchor,'"data-content-search-turn-key":H,"data-codex-usage-turn":ge,"data-codex-usage-thread":f,children:[Oe,(0,Tk.jsx)(`div`,{"data-codex-usage-turn-slot":!0})]')
-    composer_anchor='"data-thread-find-composer":`true`,onMouseDownCapture:me,onFocusCapture:K,children:he'
-    if old.count(composer_anchor)!=1:raise RuntimeError('输入框组件入口不唯一，已停止构建')
-    old=old.replace(composer_anchor,'"data-thread-find-composer":`true`,onMouseDownCapture:me,onFocusCapture:K,children:[he,(0,LE.jsx)(`div`,{"data-codex-usage-strip-slot":!0})]')
-    changes[turn] = old.encode()
-    sidebar='webview/assets/app-initial-5851df3f6cb1.js'
-    old=read_entry(source,header,offset,sidebar).decode()
-    anchor='"data-app-navigation-rail":N,"aria-label":P,children:[F,I,ee,O]'
-    if old.count(anchor)!=1:raise RuntimeError('侧栏组件入口不唯一，已停止构建')
-    changes[sidebar]=old.replace(anchor,'"data-app-navigation-rail":N,"aria-label":P,children:[F,I,ee,(0,x4.jsx)(`div`,{"data-codex-usage-ring-slot":!0,className:`shrink-0 flex flex-col items-center`}),O]').encode()
-    for name in ['usage-data.cjs','usage-host.cjs','usage-preload.cjs','enhancement-loader.cjs','enhancement-preload.cjs']:
-        changes['.vite/build/'+name] = (ROOT/'src'/name).read_bytes()
-    next_offset = source.stat().st_size-offset
+    next_offset = source.stat().st_size - offset
     new_header = copy.deepcopy(header)
     for name, data in changes.items():
-        put(new_header,name,{'size':len(data),'offset':str(next_offset),'integrity':integrity(data)})
+        put(new_header, name, {'size':len(data), 'offset':str(next_offset), 'integrity':integrity(data)})
         next_offset += len(data)
-    raw = json.dumps(new_header,ensure_ascii=False,separators=(',',':')).encode()
-    padded = raw + b'\0'*((-len(raw)) % 4)
-    header_pickle = struct.pack('<II',len(padded)+4,len(raw))+padded
-    target.parent.mkdir(parents=True,exist_ok=True)
+    raw = json.dumps(new_header, ensure_ascii=False, separators=(',', ':')).encode()
+    padded = raw + b'\0' * ((-len(raw)) % 4)
+    header_pickle = struct.pack('<II', len(padded)+4, len(raw)) + padded
+    target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix('.building')
-    # 使用独立的新文件，避免对硬链接目标写入，确保原客户端不受影响。
     with temporary.open('wb') as out, source.open('rb') as inp:
-        out.write(struct.pack('<II',4,len(header_pickle)))
+        out.write(struct.pack('<II', 4, len(header_pickle)))
         out.write(header_pickle)
         inp.seek(offset)
-        shutil.copyfileobj(inp,out,1024*1024)
+        shutil.copyfileobj(inp, out, 1024*1024)
         for data in changes.values(): out.write(data)
-    os.replace(temporary,target)
-    return {name:hashlib.sha256(data).hexdigest() for name,data in changes.items()}
+    os.replace(temporary, target)
+
+
+def build_archive(source, target):
+    header, offset = read_header(source)
+    version = json.loads(read_entry(source, header, offset, 'package.json'))['version']
+    if version != VERSION:
+        raise RuntimeError(f'客户端版本 {version} 未适配；仅支持 {VERSION}')
+    early, preload = '.vite/build/early-bootstrap.js', '.vite/build/preload.js'
+    changes = {
+        early: b"require('./enhancement-loader.cjs').register();\n" + read_entry(source, header, offset, early),
+        preload: read_entry(source, header, offset, preload) + b'\n;' + (ROOT/'dist/enhancement-preload.cjs').read_bytes(),
+        '.vite/build/enhancement-loader.cjs': (ROOT/'src/enhancement-loader.cjs').read_bytes(),
+        '.vite/build/protocol.cjs': (ROOT/'src/protocol.cjs').read_bytes()
+    }
+    write_archive(source, target, changes)
+    return {name:hashlib.sha256(data).hexdigest() for name, data in changes.items()}
+
 
 def find_source():
     result = subprocess.run(['powershell','-NoProfile','-Command',
@@ -173,64 +164,109 @@ def prepare_portable_executable(executable, archive):
     if not k.EndUpdateResourceW(handle,False):raise ctypes.WinError(ctypes.get_last_error())
     return hash_value
 
-def build(source, destination):
-    source = source.resolve(); destination = destination.resolve()
-    if source == destination or source in destination.parents or destination in source.parents:
-        raise RuntimeError('输出目录必须独立于原客户端')
-    runtime = destination/'app'
-    if runtime.exists() and not (destination/'installation.json').exists():
-        raise RuntimeError('输出目录中存在未登记的 app，拒绝覆盖')
-    original = source/'resources/app.asar'
-    before = hashlib.file_digest(original.open('rb'),'sha256').hexdigest()
-    print('复制客户端运行时……',flush=True)
-    copies = clone_runtime(source,runtime)
-    plugin=destination/'plugins/codex-usage'
-    (plugin/'lib').mkdir(parents=True,exist_ok=True)
-    (plugin/'ui').mkdir(parents=True,exist_ok=True)
-    shutil.copy2(ROOT/'plugin/plugin.json',plugin/'plugin.json')
-    for name in ['usage-data.cjs','usage-host.cjs']:shutil.copy2(ROOT/'src'/name,plugin/'lib'/name)
-    shutil.copy2(ROOT/'src/usage-preload.cjs',plugin/'ui/usage-preload.cjs')
-    # 只从本机原安装包复制透明任务栏图标，不把原客户端素材放入源码发布包。
-    icon_dir=plugin/'assets/app-icons'
-    for variant in ['lightunplated','unplated']:
-        icon=source.parent/'assets'/f'Square44x44Logo.targetsize-32_altform-{variant}.png'
-        if icon.is_file():
-            icon_dir.mkdir(parents=True,exist_ok=True)
-            shutil.copy2(icon,icon_dir/icon.name)
-    settings=destination/'plugins.json'
-    if not settings.exists():settings.write_text(json.dumps({'loaderVersion':1,'plugins':{'codex-usage':{'enabled':True}}},indent=2),encoding='utf-8')
-    print('构建定制界面……',flush=True)
-    patches = patch_asar(original,runtime/'resources/app.asar')
-    # 更新前先从原版重新复制 exe，确保永远不会修改共享硬链接。
-    independent = runtime/'ChatGPT.portable-building'
-    shutil.copy2(source/'ChatGPT.exe',independent)
-    os.replace(independent,runtime/'ChatGPT.exe')
-    archive_header_hash = prepare_portable_executable(runtime/'ChatGPT.exe',runtime/'resources/app.asar')
-    after = hashlib.file_digest(original.open('rb'),'sha256').hexdigest()
-    if before != after: raise RuntimeError('原版文件校验发生变化')
-    record = {'version':VERSION,'source':str(source),'destination':str(destination),'originalAsarSha256':before,
-              'createdAt':time.strftime('%Y-%m-%d %H:%M:%S'),'patches':patches,'asarHeaderSha256':archive_header_hash,**copies}
-    (destination/'installation.json').write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding='utf-8')
-    # 启动脚本等待用户手动退出原客户端，不会强制终止当前工作。
-    script = r'''$ErrorActionPreference = 'Stop'
-$runtime = Join-Path $PSScriptRoot 'app\ChatGPT.exe'
-$existing = Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.ExecutablePath -match 'Codex|CodexUsageUI' }
-if ($existing) {
-    Add-Type -AssemblyName PresentationFramework
-    [System.Windows.MessageBox]::Show('请先从托盘完全退出 Codex，再启动插件加载器。当前任务不会被强制停止。','Codex') | Out-Null
-    exit
-}
-Start-Process -FilePath $runtime -WorkingDirectory (Split-Path $runtime)
-'''
-    (destination/'Start-CodexUsageUI.ps1').write_text(script,encoding='utf-8-sig')
-    restore = r'''$ErrorActionPreference = 'Stop'
-$record = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'installation.json') -Raw | ConvertFrom-Json
-$existing = Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.ExecutablePath -match 'Codex|CodexUsageUI' }
-if ($existing) { Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('请先完全退出 Codex。','切回原版') | Out-Null; exit }
-Start-Process -FilePath (Join-Path $record.source 'ChatGPT.exe') -WorkingDirectory $record.source
-'''
-    (destination/'Start-OriginalCodex.ps1').write_text(restore,encoding='utf-8-sig')
-    control=r'''param([ValidateSet('Enable','Disable')][string]$Mode='Enable')
+
+def file_hash(file):
+    with file.open('rb') as handle:
+        return hashlib.file_digest(handle, 'sha256').hexdigest()
+
+
+def verify_bundles():
+    digest = hashlib.sha256()
+    files = sorted(p for p in (ROOT/'src').rglob('*') if p.suffix in {'.mjs', '.cjs', '.css'})
+    for file in files:
+        digest.update(file.relative_to(ROOT).as_posix().encode() + b'\0')
+        digest.update(file.read_text(encoding='utf-8').replace('\r\n', '\n').encode() + b'\0')
+    expected = b'// codsh-source-sha256:' + digest.hexdigest().encode()
+    for name in ['usage-preload.cjs', 'enhancement-preload.cjs']:
+        file = ROOT/'dist'/name
+        if not file.is_file() or file.read_bytes().splitlines()[0] != expected:
+            raise RuntimeError('构建文件缺失或已过期；开发者请运行 npm ci --ignore-scripts 和 npm run build')
+
+
+def write_atomic(target, data):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + '.tmp')
+    temporary.write_bytes(data)
+    os.replace(temporary, target)
+
+
+def write_json(target, data):
+    write_atomic(target, json.dumps(data, ensure_ascii=False, indent=2).encode())
+
+
+def prepare_runtime(source, destination, original_hash):
+    bridge = hashlib.sha256(original_hash.encode())
+    for file in [ROOT/'src/enhancement-loader.cjs', ROOT/'src/protocol.cjs', ROOT/'dist/enhancement-preload.cjs']:
+        data = file.read_bytes().replace(b'\r\n', b'\n')
+        # 前端版本摘要不影响桥本身的身份，普通插件升级可复用运行时。
+        if file.parent.name == 'dist': data = data.split(b'\n', 1)[1]
+        bridge.update(data)
+    bridge_hash = bridge.hexdigest()
+    runtimes = destination/'runtimes'
+    runtime = runtimes/f'{VERSION}-{bridge_hash[:16]}'
+    if runtime.exists():
+        record_file = runtime/'runtime.json'
+        if not record_file.is_file(): raise RuntimeError('运行时目录未登记，拒绝覆盖')
+        record = json.loads(record_file.read_text(encoding='utf-8'))
+        if record['bridgeSha256'] != bridge_hash or record['originalAsarSha256'] != original_hash:
+            raise RuntimeError('运行时身份不符')
+        for name, digest in record['files'].items():
+            if file_hash(runtime/name) != digest: raise RuntimeError('运行时文件校验不符')
+        return runtime/'app', True
+    staging = runtimes/('.building-'+uuid.uuid4().hex)
+    try:
+        app = staging/'app'
+        clone_runtime(source, app)
+        build_archive(source/'resources/app.asar', app/'resources/app.asar')
+        independent = app/'ChatGPT.portable-building'
+        shutil.copy2(source/'ChatGPT.exe', independent)
+        os.replace(independent, app/'ChatGPT.exe')
+        prepare_portable_executable(app/'ChatGPT.exe', app/'resources/app.asar')
+        write_json(app/'resources/codsh-loader.json', {'base':os.path.relpath(destination, runtime/'app/resources')})
+        write_json(staging/'runtime.json', {
+            'clientVersion':VERSION, 'bridgeSha256':bridge_hash, 'originalAsarSha256':original_hash,
+            'files':{str(p.relative_to(staging)).replace('\\','/'):file_hash(p) for p in [
+                app/'ChatGPT.exe', app/'resources/app.asar', app/'resources/codsh-loader.json']}
+        })
+        staging.rename(runtime)
+    except BaseException:
+        if staging.exists() and staging.resolve().parent == runtimes.resolve(): shutil.rmtree(staging)
+        raise
+    return runtime/'app', False
+
+
+def install_plugin(source, destination):
+    plugin = destination/'plugins/codex-usage'
+    for file in ['usage-model.cjs', 'usage-data.cjs', 'rollout-store.cjs', 'protocol.cjs', 'usage-host.cjs']:
+        write_atomic(plugin/'lib'/file, (ROOT/'src'/file).read_bytes())
+    # 提交完整前端后再更新清单，加载器按摘要切换版本。
+    write_atomic(plugin/'ui/usage-preload.cjs', (ROOT/'dist/usage-preload.cjs').read_bytes())
+    write_atomic(plugin/'plugin.json', (ROOT/'plugin/plugin.json').read_bytes())
+    for variant in ['lightunplated', 'unplated']:
+        icon = source.parent/'assets'/f'Square44x44Logo.targetsize-32_altform-{variant}.png'
+        if icon.is_file(): write_atomic(plugin/'assets/app-icons'/icon.name, icon.read_bytes())
+    settings = destination/'plugins.json'
+    if not settings.exists(): write_json(settings, {'loaderVersion':2, 'plugins':{'codex-usage':{'enabled':True}}})
+
+
+def install_controls(destination):
+    scripts = {
+        'Start-CodexUsageUI.ps1': r'''$ErrorActionPreference='Stop'
+$record=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'installation.json') -Raw | ConvertFrom-Json
+$base=[IO.Path]::GetFullPath($PSScriptRoot)+[IO.Path]::DirectorySeparatorChar
+$runtime=[IO.Path]::GetFullPath((Join-Path $record.runtime 'ChatGPT.exe'))
+if(-not $runtime.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)){throw '运行时路径无效'}
+$existing=Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.ExecutablePath -match 'Codex|CodexUsageUI' }
+if($existing){Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('请先从托盘完全退出 Codex，再重新打开。','Codex') | Out-Null; exit}
+Start-Process -FilePath $runtime -WorkingDirectory (Split-Path $runtime) -WindowStyle Hidden
+''',
+        'Start-OriginalCodex.ps1': r'''$ErrorActionPreference='Stop'
+$record=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'installation.json') -Raw | ConvertFrom-Json
+$existing=Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.ExecutablePath -match 'Codex|CodexUsageUI' }
+if($existing){Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('请先完全退出 Codex。','Codex') | Out-Null; exit}
+Start-Process -FilePath (Join-Path $record.source 'ChatGPT.exe') -WorkingDirectory $record.source -WindowStyle Hidden
+''',
+        'Set-UsagePlugin.ps1': r'''param([ValidateSet('Enable','Disable')][string]$Mode='Enable')
 $ErrorActionPreference='Stop'
 $file=Join-Path $PSScriptRoot 'plugins.json'
 $settings=Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
@@ -238,53 +274,51 @@ $settings.plugins.'codex-usage'.enabled=($Mode -eq 'Enable')
 $temporary=$file+'.tmp'
 [IO.File]::WriteAllText($temporary,($settings | ConvertTo-Json -Depth 8),([Text.UTF8Encoding]::new($false)))
 Move-Item -LiteralPath $temporary -Destination $file -Force
-'''
-    (destination/'Set-UsagePlugin.ps1').write_text(control,encoding='utf-8-sig')
-    for mode in ['Enable','Disable']:
-        (destination/(mode+'-UsagePlugin.ps1')).write_text("& (Join-Path $PSScriptRoot 'Set-UsagePlugin.ps1') -Mode "+mode+'\n',encoding='utf-8-sig')
-    uninstall=r'''$ErrorActionPreference='Stop'
+''',
+        'Uninstall-UsagePlugin.ps1': r'''$ErrorActionPreference='Stop'
 & (Join-Path $PSScriptRoot 'Set-UsagePlugin.ps1') -Mode Disable
 $base=[IO.Path]::GetFullPath($PSScriptRoot)
-$target=[IO.Path]::GetFullPath((Join-Path $base 'plugins\codex-usage'))
 $expected=Join-Path $base 'plugins\codex-usage'
-if(-not [string]::Equals($target,$expected,[StringComparison]::OrdinalIgnoreCase)){throw '插件目录校验失败'}
-if(-not $target.StartsWith($base+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '插件目录不在加载器内'}
+$target=[IO.Path]::GetFullPath($expected)
+if(-not [string]::Equals($target,$expected,[StringComparison]::OrdinalIgnoreCase) -or -not $target.StartsWith($base+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '插件目录校验失败'}
 if(Test-Path -LiteralPath $target){Remove-Item -LiteralPath $target -Recurse -Force}
-$integration=Join-Path $PSScriptRoot 'shortcut-integration.json'
-if(Test-Path -LiteralPath $integration){
- $original=Get-Content -LiteralPath $integration -Raw | ConvertFrom-Json
- if(Test-Path -LiteralPath $original.backup){Copy-Item -LiteralPath $original.backup -Destination $original.path -Force}
-}
+$integration=Join-Path $base 'shortcut-integration.json'
+if(Test-Path -LiteralPath $integration){$original=Get-Content -LiteralPath $integration -Raw | ConvertFrom-Json; if(Test-Path -LiteralPath $original.backup){Copy-Item -LiteralPath $original.backup -Destination $original.path -Force}}
 '''
-    (destination/'Uninstall-UsagePlugin.ps1').write_text(uninstall,encoding='utf-8-sig')
-    shortcuts=r'''$ErrorActionPreference='Stop'
-$base=$PSScriptRoot
-$desktop=[Environment]::GetFolderPath('Desktop')
-$controls=Join-Path $desktop 'Codex用量插件'
-New-Item -ItemType Directory -Path $controls -Force | Out-Null
-$shell=New-Object -ComObject WScript.Shell
-$items=@(
- @{Name='启用用量插件';Script='Enable-UsagePlugin.ps1';Directory=$controls},
- @{Name='停用用量插件';Script='Disable-UsagePlugin.ps1';Directory=$controls},
- @{Name='卸载用量插件';Script='Uninstall-UsagePlugin.ps1';Directory=$controls}
-)
-foreach($item in $items){
- $link=$shell.CreateShortcut((Join-Path $item.Directory ($item.Name+'.lnk')))
- $link.TargetPath=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
- $link.Arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $base $item.Script)+'"'
- $link.WorkingDirectory=$base
- $link.IconLocation=Join-Path $base 'app\resources\chatgpt-app-dark.ico'
- $link.Description=$item.Name
- $link.Save()
-}
-'''
-    (destination/'Create-Shortcuts.ps1').write_text(shortcuts,encoding='utf-8-sig')
-    print(json.dumps(record,ensure_ascii=False,indent=2),flush=True)
+    }
+    for mode in ['Enable', 'Disable']:
+        scripts[mode+'-UsagePlugin.ps1'] = "& (Join-Path $PSScriptRoot 'Set-UsagePlugin.ps1') -Mode "+mode+'\n'
+    for name, text in scripts.items(): write_atomic(destination/name, text.encode('utf-8-sig'))
+
+
+def build(source, destination):
+    source, destination = source.resolve(), destination.resolve()
+    if source == destination or source in destination.parents or destination in source.parents:
+        raise RuntimeError('安装目录必须独立于原客户端')
+    if destination == ROOT or ROOT in destination.parents or destination in ROOT.parents:
+        raise RuntimeError('安装目录必须独立于仓库')
+    verify_bundles()
+    original = source/'resources/app.asar'
+    header, offset = read_header(original)
+    actual = json.loads(read_entry(original, header, offset, 'package.json'))['version']
+    if actual != VERSION: raise RuntimeError(f'客户端版本 {actual} 未适配；仅支持 {VERSION}')
+    before = file_hash(original)
+    print('准备加载运行时……', flush=True)
+    runtime, reused = prepare_runtime(source, destination, before)
+    install_plugin(source, destination)
+    if file_hash(original) != before: raise RuntimeError('原版文件校验发生变化')
+    record = {'pluginVersion':json.loads((ROOT/'plugin/plugin.json').read_text(encoding='utf-8'))['version'],
+              'clientVersion':VERSION, 'source':str(source), 'destination':str(destination), 'runtime':str(runtime),
+              'originalAsarSha256':before, 'createdAt':time.strftime('%Y-%m-%d %H:%M:%S')}
+    write_json(destination/'installation.json', record)
+    install_controls(destination)
+    print(f"插件 {record['pluginVersion']} 已安装；运行时{'复用' if reused else '新建'}。", flush=True)
     return record
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source',type=Path)
-    parser.add_argument('--destination',type=Path,default=DEFAULT)
-    args=parser.parse_args()
-    build(args.source or find_source(),args.destination)
+    parser.add_argument('--source', type=Path)
+    parser.add_argument('--destination', type=Path, default=DEFAULT)
+    args = parser.parse_args()
+    build(args.source or find_source(), args.destination)

@@ -1,12 +1,13 @@
 'use strict';
 (()=>{
   const {ipcRenderer}=require('electron');
+  const {STATE_CHANNEL}=require('./protocol.cjs');
   let currentKey=null,busy=false,stopped=false;
   async function sync(){
     if(busy || stopped)return;
     busy=true;
     try{
-      const state=await ipcRenderer.invoke('codex-enhancement-loader:state-v1');
+      const state=await ipcRenderer.invoke(STATE_CHANNEL);
       if(stopped)return;
       if(!state.enabled || state.key!==currentKey){
         window.__codexUsagePluginDispose?.();currentKey=null;
