@@ -1,4 +1,4 @@
-// codsh-source-sha256:36d7ab201fc2a5604b739f765831e93c70228172810b8f9b948dd3c2a673a80c
+// codsh-source-sha256:b18d845ff45e580766ec459790593dce63a5752c9f7f8b9e1b048cba550fd34d
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -195,8 +195,15 @@
     return node && node.getClientRects().length > 0 && node.closest('[aria-hidden="true"],[hidden],[inert]') == null && !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
   }
   function uniqueThread(nodes, attribute) {
-    const ids = new Set(nodes.map((node) => normalizeThreadId(node.getAttribute(attribute))));
+    const ids = new Set(nodes.map((node) => normalizeThreadId(node.getAttribute(attribute))).filter(Boolean));
     return ids.size === 1 ? [...ids][0] : null;
+  }
+  function composerRoot(node) {
+    const footer = node.closest("[data-thread-scroll-footer]");
+    if (!footer) return node;
+    let parent;
+    while ((parent = node.parentElement?.closest("[data-thread-find-composer]")) && footer.contains(parent)) node = parent;
+    return node;
   }
   function turnId(root, turns) {
     const key = root.getAttribute("data-content-search-turn-key") ?? "";
@@ -209,15 +216,19 @@
       this.actions = /* @__PURE__ */ new Set();
     }
     composer() {
-      const nodes = [...document.querySelectorAll("[data-thread-find-composer]")].filter(visible);
-      return nodes.find((node) => node.contains(document.activeElement)) ?? nodes.at(-1) ?? null;
+      const nodes = [...new Set([...document.querySelectorAll("[data-thread-find-composer]")].filter((node) => !node.matches("button,input,textarea") && visible(node)).map(composerRoot))];
+      const footers = nodes.filter((node) => node.closest("[data-thread-scroll-footer]"));
+      const candidates = footers.length ? footers : nodes;
+      return candidates.find((node) => node.contains(document.activeElement)) ?? candidates.at(-1) ?? null;
     }
     thread(composer = this.composer()) {
       for (const scope of [composer, composer?.closest("[data-thread-scroll-footer]")]) {
-        const portals = scope ? [...scope.querySelectorAll("[data-above-composer-conversation-id]")].filter((node) => !node.closest("[data-thread-find-composer]") || node.closest("[data-thread-find-composer]") === composer) : [];
+        const portals = scope ? [...scope.querySelectorAll("[data-above-composer-conversation-id]")] : [];
         if (portals.length) return uniqueThread(portals, "data-above-composer-conversation-id");
       }
-      const responses = [...document.querySelectorAll("[data-response-annotation-conversation]")].filter(visible);
+      const container = composer?.closest(".thread-scroll-container");
+      if (composer && !container) return null;
+      const responses = [...(container ?? document).querySelectorAll("[data-response-annotation-conversation]")].filter(visible);
       return uniqueThread(responses, "data-response-annotation-conversation");
     }
     scan(snapshot) {
@@ -232,7 +243,7 @@
         while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest("[data-content-search-turn-key]");
         const turn = turns.get(key);
         if (!turn?.completed) continue;
-        const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1);
+        const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1) ?? [...root.querySelectorAll(".turn-action-controls")].filter((node) => visible(node) && !node.closest("[data-response-annotation-conversation]") && Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
         replies.set(key, { turn, parent: actions ?? response, inline: Boolean(actions) });
       }
       return { id, composer, replies, quota: this.quotaMount() };

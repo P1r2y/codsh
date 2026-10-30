@@ -7,7 +7,8 @@
     if(busy || stopped)return;
     busy=true;
     try{
-      const state=await ipcRenderer.invoke(STATE_CHANNEL);
+      if(currentKey && typeof window.__codexUsagePluginDispose!=='function')currentKey=null;
+      const state=await ipcRenderer.invoke(STATE_CHANNEL,{key:currentKey});
       if(stopped)return;
       if(!state.enabled || state.key!==currentKey){
         window.__codexUsagePluginDispose?.();currentKey=null;

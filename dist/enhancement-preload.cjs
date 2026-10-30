@@ -1,4 +1,4 @@
-// codsh-source-sha256:36d7ab201fc2a5604b739f765831e93c70228172810b8f9b948dd3c2a673a80c
+// codsh-source-sha256:b18d845ff45e580766ec459790593dce63a5752c9f7f8b9e1b048cba550fd34d
 "use strict";
 (() => {
   var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -39,7 +39,8 @@
           if (busy || stopped) return;
           busy = true;
           try {
-            const state = await ipcRenderer.invoke(STATE_CHANNEL);
+            if (currentKey && typeof window.__codexUsagePluginDispose !== "function") currentKey = null;
+            const state = await ipcRenderer.invoke(STATE_CHANNEL, { key: currentKey });
             if (stopped) return;
             if (!state.enabled || state.key !== currentKey) {
               window.__codexUsagePluginDispose?.();

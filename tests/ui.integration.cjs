@@ -158,6 +158,39 @@ async function selfTest() {
     const waiting=await navigationState();
     await win.webContents.executeJavaScript(`window.fixtureNavigate(${JSON.stringify(fixture.snapshot.threadId)})`);await delay(700);const rapidReturn=await navigationState();
     await win.webContents.executeJavaScript(`window.fixtureNavigate(null)`);await delay(250);const emptyThread=await navigationState();
+    await win.webContents.executeJavaScript(`window.fixtureNavigate(${JSON.stringify(fixture.snapshot.threadId)})`);await delay(250);
+    await win.webContents.executeJavaScript(`(()=>{
+      const root=document.querySelector('[data-thread-find-composer]'),strip=root.querySelector('.cu-strip'),form=document.createElement('form');
+      form.setAttribute('data-thread-find-composer','true');root.insertBefore(form,strip);
+      for(const child of [...root.childNodes])if(child!==strip&&child!==form)form.append(child);
+      const decoy=document.createElement('button');decoy.type='button';decoy.textContent='确认';
+      decoy.setAttribute('data-thread-find-composer','');document.body.append(decoy);decoy.focus();
+      const blank=document.createElement('span');blank.setAttribute('data-above-composer-conversation-id','');form.append(blank);
+    })()`);
+    await delay(300);
+    const adapterState=()=>win.webContents.executeJavaScript(`(()=>{
+      const strip=document.querySelector('.cu-strip'),footer=strip?.closest('[data-thread-scroll-footer]');
+      return {strips:document.querySelectorAll('.cu-strip').length,thread:strip?.dataset.cuThread,
+        outsideForm:strip?.parentElement.classList.contains('composer-area')&&strip?.closest('form')==null,
+        footer:footer?.dataset.fixtureFooter,hiddenStrips:document.querySelectorAll('[data-thread-scroll-footer][hidden] .cu-strip').length,
+        replies:[...document.querySelectorAll('main[data-fixture-view=first] .cu-turn')].map(node=>({inline:node.parentElement.classList.contains('turn-action-controls'),sibling:node.parentElement.dataset.fixtureSibling==='true'})),text:strip?.textContent};
+    })()`);
+    const nestedComposer=await adapterState();
+    await win.webContents.executeJavaScript(`(()=>{
+      const root=document.querySelector('main[data-fixture-view=first] [data-content-search-turn-key]'),response=root.querySelector('[data-response-annotation-conversation]');
+      const actions=response.querySelector('.turn-action-controls');actions.dataset.fixtureSibling='true';root.append(actions);
+      const userActions=document.createElement('div');userActions.className='turn-action-controls';root.prepend(userActions);
+    })()`);await delay(250);
+    const siblingActions=await adapterState();
+    fs.writeFileSync(output+'.adaptation.png',(await win.webContents.capturePage()).toPNG());
+    await win.webContents.executeJavaScript(`(()=>{
+      const old=document.querySelector('[data-thread-scroll-footer]'),next=old.cloneNode(true);
+      next.querySelectorAll('.cu-strip').forEach(node=>node.remove());next.dataset.fixtureFooter='replacement';
+      old.hidden=true;old.after(next);
+    })()`);await delay(300);
+    const replacedComposer=await adapterState();
+    await win.webContents.executeJavaScript(`document.querySelector('[data-fixture-footer=replacement]').querySelectorAll('[data-above-composer-conversation-id]').forEach(node=>node.remove())`);
+    await delay(250);const missingPortal=await adapterState();
     const checks={
       layout:!!report.strip&&report.stripHeight===46&&report.composerShift===8&&Math.abs(report.verticalCenterOffset)<.1,
       replies:report.footers===2&&report.replyStats.every(r=>!r.text.includes('≈')&&!/月|\d{2}:\d{2}/.test(r.text)&&r.hoverTitles===0&&r.inline),
@@ -187,7 +220,13 @@ async function selfTest() {
       rapidNavigation:!waiting.strip.includes('910K tok')&&rapidReturn.strip.includes('910K tok')&&rapidReturn.visibleFooters===2&&rapidReturn.hiddenFooters===0,
       emptyThread:!emptyThread.strip.includes('tok')&&emptyThread.visibleFooters===0&&emptyThread.hiddenFooters===0
     });
-    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,tooltipState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread}});
+    Object.assign(checks,{
+      nestedComposer:nestedComposer.strips===1&&nestedComposer.outsideForm&&nestedComposer.thread===fixture.snapshot.threadId&&nestedComposer.replies.length===2,
+      siblingActions:siblingActions.replies.length===2&&siblingActions.replies.every(reply=>reply.inline)&&siblingActions.replies[0].sibling,
+      replacedComposer:replacedComposer.strips===1&&replacedComposer.outsideForm&&replacedComposer.footer==='replacement'&&replacedComposer.hiddenStrips===0&&replacedComposer.thread===fixture.snapshot.threadId,
+      missingPortal:missingPortal.thread===''&&!missingPortal.text.includes('tok')&&missingPortal.replies.length===0
+    });
+    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,tooltipState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal}});
     win.destroy(); app.exit(0);
   } catch (e) { write({ok:false,error:String(e),stack:e.stack}); app.exit(1); }
 }

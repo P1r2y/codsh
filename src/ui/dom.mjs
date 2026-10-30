@@ -10,8 +10,16 @@ export function visible(node) {
 }
 
 function uniqueThread(nodes, attribute) {
-  const ids = new Set(nodes.map(node => normalizeThreadId(node.getAttribute(attribute))));
+  const ids = new Set(nodes.map(node => normalizeThreadId(node.getAttribute(attribute))).filter(Boolean));
   return ids.size === 1 ? [...ids][0] : null;
+}
+
+function composerRoot(node) {
+  const footer = node.closest('[data-thread-scroll-footer]');
+  if (!footer) return node;
+  let parent;
+  while ((parent = node.parentElement?.closest('[data-thread-find-composer]')) && footer.contains(parent)) node = parent;
+  return node;
 }
 
 function turnId(root, turns) {
@@ -26,17 +34,21 @@ export class CodexDOM {
     this.actions = new Set();
   }
   composer() {
-    const nodes = [...document.querySelectorAll('[data-thread-find-composer]')].filter(visible);
-    return nodes.find(node => node.contains(document.activeElement)) ?? nodes.at(-1) ?? null;
+    const nodes = [...new Set([...document.querySelectorAll('[data-thread-find-composer]')]
+      .filter(node => !node.matches('button,input,textarea') && visible(node)).map(composerRoot))];
+    const footers = nodes.filter(node => node.closest('[data-thread-scroll-footer]'));
+    const candidates = footers.length ? footers : nodes;
+    return candidates.find(node => node.contains(document.activeElement)) ?? candidates.at(-1) ?? null;
   }
   thread(composer = this.composer()) {
     for (const scope of [composer, composer?.closest('[data-thread-scroll-footer]')]) {
-      const portals = scope ? [...scope.querySelectorAll('[data-above-composer-conversation-id]')]
-        .filter(node => !node.closest('[data-thread-find-composer]') || node.closest('[data-thread-find-composer]') === composer) : [];
+      const portals = scope ? [...scope.querySelectorAll('[data-above-composer-conversation-id]')] : [];
       // 原生 portal 可以零高度，所属输入框的可见性才决定其是否有效。
       if (portals.length) return uniqueThread(portals, 'data-above-composer-conversation-id');
     }
-    const responses = [...document.querySelectorAll('[data-response-annotation-conversation]')].filter(visible);
+    const container = composer?.closest('.thread-scroll-container');
+    if (composer && !container) return null;
+    const responses = [...(container ?? document).querySelectorAll('[data-response-annotation-conversation]')].filter(visible);
     return uniqueThread(responses, 'data-response-annotation-conversation');
   }
   scan(snapshot) {
@@ -51,7 +63,10 @@ export class CodexDOM {
       while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest('[data-content-search-turn-key]');
       const turn = turns.get(key);
       if (!turn?.completed) continue;
-      const actions = [...response.querySelectorAll('.turn-action-controls')].filter(visible).at(-1);
+      const actions = [...response.querySelectorAll('.turn-action-controls')].filter(visible).at(-1) ??
+        [...root.querySelectorAll('.turn-action-controls')].filter(node => visible(node) &&
+          !node.closest('[data-response-annotation-conversation]') &&
+          Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
       // 同一轮只保留最后一条原生回复的操作栏；操作栏稍后出现时会移动同一个统计节点。
       replies.set(key, { turn, parent: actions ?? response, inline: Boolean(actions) });
     }

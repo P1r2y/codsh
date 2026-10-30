@@ -29,15 +29,15 @@ function register(){
   const manifest=readJson(path.join(plugin,'plugin.json'));
   require(resolveEntry(manifest.host)).register({isEnabled});
   let cache=null;
-  ipcMain.handle(STATE_CHANNEL,event=>{
+  ipcMain.handle(STATE_CHANNEL,(event,request)=>{
     if(!event.senderFrame?.url?.startsWith('app://'))return {enabled:false};
     if(!isEnabled())return {enabled:false};
     const file=resolveEntry(manifest.preload),stat=fs.statSync(file);
-    if(!cache || cache.modified!==stat.mtimeMs){
+    if(!cache || cache.modified!==stat.mtimeMs || cache.size!==stat.size){
       const code=fs.readFileSync(file,'utf8');
-      cache={modified:stat.mtimeMs,code,key:crypto.createHash('sha256').update(code).digest('hex')};
+      cache={modified:stat.mtimeMs,size:stat.size,code,key:crypto.createHash('sha256').update(code).digest('hex')};
     }
-    return {enabled:true,key:cache.key,code:cache.code};
+    return {enabled:true,key:cache.key,...(request?.key===cache.key?{}:{code:cache.code})};
   });
 }
 module.exports={register};

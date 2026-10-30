@@ -16,7 +16,16 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT = Path(os.environ['LOCALAPPDATA']) / 'CodexUsageUI'
-VERSION = json.loads((ROOT/'plugin/plugin.json').read_text(encoding='utf-8'))['clientVersion']
+MANIFEST = json.loads((ROOT/'plugin/plugin.json').read_text(encoding='utf-8'))
+VERSION = MANIFEST['clientVersion']
+CLIENT_VERSIONS = tuple(MANIFEST.get('clientVersions', [VERSION]))
+BRIDGE_MAIN = '.vite/build/early-bootstrap.js'
+BRIDGE_PRELOAD = '.vite/build/preload.js'
+NATIVE_MARKERS = (
+    'data-thread-find-composer', 'data-thread-scroll-footer', 'data-above-composer-conversation-id',
+    'data-content-search-turn-key', 'data-response-annotation-conversation', 'turn-action-controls',
+    'data-app-navigation-rail'
+)
 
 def read_header(p):
     with p.open('rb') as f:
@@ -69,12 +78,41 @@ def write_archive(source, target, changes):
     os.replace(temporary, target)
 
 
-def build_archive(source, target):
+def validate_client(source):
     header, offset = read_header(source)
-    version = json.loads(read_entry(source, header, offset, 'package.json'))['version']
-    if version != VERSION:
-        raise RuntimeError(f'客户端版本 {version} 未适配；仅支持 {VERSION}')
-    early, preload = '.vite/build/early-bootstrap.js', '.vite/build/preload.js'
+    package = json.loads(read_entry(source, header, offset, 'package.json'))
+    version = package['version']
+    if version not in CLIENT_VERSIONS:
+        raise RuntimeError(f"客户端版本 {version} 未适配；支持 {', '.join(CLIENT_VERSIONS)}")
+    try:
+        if 'enhancement-loader.cjs' in entry(header, '.vite/build').get('files', {}):
+            raise RuntimeError('所选客户端已包含加载器；请指定原版 app 目录')
+    except KeyError: raise RuntimeError('客户端加载入口缺失，已停止安装') from None
+    if package.get('main', '').removeprefix('./') != BRIDGE_MAIN:
+        raise RuntimeError('客户端主入口不匹配，已停止安装')
+    for name in [BRIDGE_MAIN, BRIDGE_PRELOAD]:
+        try: code = read_entry(source, header, offset, name)
+        except KeyError: raise RuntimeError(f'加载入口缺失：{name}') from None
+        if not re.search(rb"\brequire\s*\(\s*(['\"`])electron\1\s*\)", code):
+            raise RuntimeError(f'加载入口结构不匹配：{name}')
+    missing = {marker.encode() for marker in NATIVE_MARKERS}
+    try: assets = entry(header, 'webview/assets').get('files', {})
+    except KeyError: raise RuntimeError('原生界面资源缺失，已停止安装') from None
+    with source.open('rb') as handle:
+        for name, record in assets.items():
+            if not name.endswith('.js') or 'offset' not in record: continue
+            handle.seek(offset + int(record['offset']))
+            code = handle.read(record['size'])
+            missing.difference_update(marker for marker in tuple(missing) if marker in code)
+            if not missing: break
+    if missing: raise RuntimeError('原生界面结构不匹配：'+', '.join(sorted(marker.decode() for marker in missing)))
+    return version
+
+
+def build_archive(source, target):
+    validate_client(source)
+    header, offset = read_header(source)
+    early, preload = BRIDGE_MAIN, BRIDGE_PRELOAD
     changes = {
         early: b"require('./enhancement-loader.cjs').register();\n" + read_entry(source, header, offset, early),
         preload: read_entry(source, header, offset, preload) + b'\n;' + (ROOT/'dist/enhancement-preload.cjs').read_bytes(),
@@ -85,13 +123,47 @@ def build_archive(source, target):
     return {name:hashlib.sha256(data).hexdigest() for name, data in changes.items()}
 
 
-def find_source():
-    result = subprocess.run(['powershell','-NoProfile','-Command',
-        "Get-AppxPackage -Name OpenAI.Codex | Select-Object -ExpandProperty InstallLocation"],capture_output=True,text=True,check=True)
-    candidates = [Path(p.strip())/'app' for p in result.stdout.splitlines() if p.strip()]
-    candidates = [p for p in candidates if (p/'resources/app.asar').is_file()]
-    if len(candidates) != 1: raise RuntimeError('未找到唯一的 Codex 安装目录')
-    return candidates[0]
+def choose_source(candidates):
+    found = {}
+    for candidate in candidates:
+        path = Path(candidate).resolve()
+        archive = path/'resources/app.asar'
+        if not archive.is_file() or not (path/'ChatGPT.exe').is_file(): continue
+        if (path/'resources/codsh-loader.json').exists(): continue
+        try:
+            header, offset = read_header(archive)
+            if 'enhancement-loader.cjs' in entry(header, '.vite/build').get('files', {}): continue
+            package = json.loads(read_entry(archive, header, offset, 'package.json'))
+            if package.get('main', '').removeprefix('./') != BRIDGE_MAIN: continue
+            version = tuple(int(part) for part in package['version'].split('.'))
+        except (OSError, KeyError, ValueError, struct.error): continue
+        found[path] = version
+    if not found: raise RuntimeError('未找到 Codex 原客户端；请用 --source 指定 app 目录')
+    # 优先最新原版；未知新版本交给兼容检查拒绝，不能悄悄回退到旧客户端。
+    return max(found, key=lambda path: found[path])
+
+
+def find_source(destination=None):
+    script = r'''
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$items=@()
+$items+=@(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.ExecutablePath -like '*\OpenAI.Codex_*\app\ChatGPT.exe' } | ForEach-Object { Split-Path $_.ExecutablePath })
+if(Get-Command Get-AppxPackage -ErrorAction SilentlyContinue){$items+=@(Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.InstallLocation 'app' })}
+ConvertTo-Json -InputObject @($items) -Compress
+'''
+    result = subprocess.run(['powershell', '-NoProfile', '-Command', script], capture_output=True, text=True, encoding='utf-8', check=True)
+    candidates = json.loads(result.stdout.strip() or '[]')
+    if not isinstance(candidates, list): candidates = [candidates]
+    for base in {DEFAULT, destination or DEFAULT}:
+        try:
+            record = json.loads((base/'installation.json').read_text(encoding='utf-8-sig'))
+            candidates.append(record['source'])
+        except (OSError, KeyError, ValueError): pass
+    applications = Path(os.environ.get('ProgramFiles', r'C:\Program Files'))/'WindowsApps'
+    try: candidates.extend(folder/'app' for folder in applications.glob('OpenAI.Codex_*__2p2nqsd0c76g0') if folder.is_dir())
+    except OSError: pass
+    candidates.append(Path(os.environ['LOCALAPPDATA'])/'Programs/OpenAI/Codex')
+    return choose_source(candidates)
 
 def clone_runtime(source, target):
     count = {'linked':0,'copied':0}
@@ -195,6 +267,7 @@ def write_json(target, data):
 
 
 def prepare_runtime(source, destination, original_hash):
+    version = validate_client(source/'resources/app.asar')
     bridge = hashlib.sha256(original_hash.encode())
     for file in [ROOT/'src/enhancement-loader.cjs', ROOT/'src/protocol.cjs', ROOT/'dist/enhancement-preload.cjs']:
         data = file.read_bytes().replace(b'\r\n', b'\n')
@@ -203,7 +276,7 @@ def prepare_runtime(source, destination, original_hash):
         bridge.update(data)
     bridge_hash = bridge.hexdigest()
     runtimes = destination/'runtimes'
-    runtime = runtimes/f'{VERSION}-{bridge_hash[:16]}'
+    runtime = runtimes/f'{version}-{bridge_hash[:16]}'
     if runtime.exists():
         record_file = runtime/'runtime.json'
         if not record_file.is_file(): raise RuntimeError('运行时目录未登记，拒绝覆盖')
@@ -224,7 +297,7 @@ def prepare_runtime(source, destination, original_hash):
         prepare_portable_executable(app/'ChatGPT.exe', app/'resources/app.asar')
         write_json(app/'resources/codsh-loader.json', {'base':os.path.relpath(destination, runtime/'app/resources')})
         write_json(staging/'runtime.json', {
-            'clientVersion':VERSION, 'bridgeSha256':bridge_hash, 'originalAsarSha256':original_hash,
+            'clientVersion':version, 'bridgeSha256':bridge_hash, 'originalAsarSha256':original_hash,
             'files':{str(p.relative_to(staging)).replace('\\','/'):file_hash(p) for p in [
                 app/'ChatGPT.exe', app/'resources/app.asar', app/'resources/codsh-loader.json']}
         })
@@ -246,7 +319,10 @@ def install_plugin(source, destination):
         icon = source.parent/'assets'/f'Square44x44Logo.targetsize-32_altform-{variant}.png'
         if icon.is_file(): write_atomic(plugin/'assets/app-icons'/icon.name, icon.read_bytes())
     settings = destination/'plugins.json'
-    if not settings.exists(): write_json(settings, {'loaderVersion':2, 'plugins':{'codex-usage':{'enabled':True}}})
+    configuration = json.loads(settings.read_text(encoding='utf-8-sig')) if settings.exists() else {}
+    configuration['loaderVersion'] = MANIFEST['loaderVersion']
+    configuration.setdefault('plugins', {}).setdefault('codex-usage', {'enabled':True})
+    write_json(settings, configuration)
 
 
 def install_controls(destination):
@@ -299,16 +375,14 @@ def build(source, destination):
         raise RuntimeError('安装目录必须独立于仓库')
     verify_bundles()
     original = source/'resources/app.asar'
-    header, offset = read_header(original)
-    actual = json.loads(read_entry(original, header, offset, 'package.json'))['version']
-    if actual != VERSION: raise RuntimeError(f'客户端版本 {actual} 未适配；仅支持 {VERSION}')
+    actual = validate_client(original)
     before = file_hash(original)
     print('准备加载运行时……', flush=True)
     runtime, reused = prepare_runtime(source, destination, before)
     install_plugin(source, destination)
     if file_hash(original) != before: raise RuntimeError('原版文件校验发生变化')
     record = {'pluginVersion':json.loads((ROOT/'plugin/plugin.json').read_text(encoding='utf-8'))['version'],
-              'clientVersion':VERSION, 'source':str(source), 'destination':str(destination), 'runtime':str(runtime),
+              'clientVersion':actual, 'source':str(source), 'destination':str(destination), 'runtime':str(runtime),
               'originalAsarSha256':before, 'createdAt':time.strftime('%Y-%m-%d %H:%M:%S')}
     write_json(destination/'installation.json', record)
     install_controls(destination)
@@ -321,4 +395,4 @@ if __name__ == '__main__':
     parser.add_argument('--source', type=Path)
     parser.add_argument('--destination', type=Path, default=DEFAULT)
     args = parser.parse_args()
-    build(args.source or find_source(), args.destination)
+    build(args.source or find_source(args.destination), args.destination)

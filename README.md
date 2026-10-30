@@ -1,6 +1,6 @@
 # Agent 安装
 
-Windows；Codex `26.1013.40934`；Python ≥3.11。本地界面增强插件，非官方市场插件。
+Windows；Codex `26.1013.40934` / `26.1021.31345`；Python ≥3.11。本地界面增强插件，非官方市场插件。
 
 ```powershell
 git clone https://github.com/P1r2y/codsh.git
@@ -15,7 +15,7 @@ git pull --ff-only
 python install.py --destination "<原安装目录>"
 ```
 
-自动定位失败时添加 `--source "<包含 ChatGPT.exe 的原客户端 app 目录>"`。版本不符则停止，不绕过检查。安装目录须独立于原客户端和仓库。
+自动检查商店版、运行进程和已有安装，选择最新原客户端。定位失败时添加 `--source "<包含 ChatGPT.exe 的原客户端 app 目录>"`。仅接受清单支持的版本，并检查加载入口和原生界面结构；不符则停止，不回退旧版本。安装目录须独立于原客户端和仓库。
 
 安装器复制客户端，仅加入主进程和预加载桥；不修改原安装目录或 React 脚本。运行时按摘要复用，新版本另建目录，保留正在运行的旧版本。
 
