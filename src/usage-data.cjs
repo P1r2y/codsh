@@ -1,6 +1,7 @@
 'use strict';
 
 const { FIELDS, emptyUsage, number, clamp, usage, add, difference } = require('./usage-model.cjs');
+const { normalizeLimits } = require('./quota-model.cjs');
 const time = v => typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : Date.parse(v);
 const modelName = value => typeof value === 'string' && value.trim() ? value.trim() : null;
 function addModel(groups, model, value) {
@@ -44,25 +45,6 @@ function generationTiming(t) {
     intervals.push(...measured.map(i=>[i.start,i.end]));
   }
   return {complete,ms:complete?unionDuration(intervals):null};
-}
-function normalizeLimits(raw, observedAt = Date.now()) {
-  if (!raw) return null;
-  const groups = raw.rateLimitsByLimitId ?? raw.rate_limits_by_limit_id;
-  const candidates = groups ? Object.values(groups) : [raw.rateLimits ?? raw.rate_limits ?? raw];
-  const groupsOut = candidates.filter(Boolean).map(g => {
-    const windows = ['primary', 'secondary'].flatMap(k => {
-      const w = g[k]; if (!w) return [];
-      const used = number(w.usedPercent ?? w.used_percent);
-      const minutes = number(w.windowDurationMins ?? w.window_minutes);
-      const resetsAt = number(w.resetsAt ?? w.resets_at);
-      if (used === null || minutes === null || minutes === 0) return [];
-      return [{kind:k, usedPercent:clamp(used), remainingPercent:clamp(100-used), windowMinutes:minutes,
-        resetsAt:resetsAt === null ? null : time(resetsAt),
-        label:minutes === 10080 ? '周额度' : minutes === 300 ? '5 小时额度' : `${minutes / 60} 小时额度`}];
-    });
-    return {id:g.limitId ?? g.limit_id ?? 'codex', name:g.limitName ?? g.limit_name ?? 'Codex', windows};
-  }).filter(g => g.windows.length);
-  return groupsOut.length ? {groups:groupsOut, observedAt} : null;
 }
 
 class UsageAccumulator {

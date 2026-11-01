@@ -1,5 +1,6 @@
 import { Lifetime } from './lifetime.mjs';
 import { ConversationController } from './controller.mjs';
+import { QuotaController } from './quota-controller.mjs';
 import { CodexDOM } from './dom.mjs';
 import { MetricGroup } from './metrics.mjs';
 import { createDetailsPopover } from './details.mjs';
@@ -17,7 +18,8 @@ export class UsagePlugin {
     this.replies = new Map();
     this.renderTimer = null;
     this.details = createDetailsPopover(() => this.quota.hide());
-    this.quota = createQuotaWidget(() => this.details.close());
+    this.quota = createQuotaWidget(() => { this.details.close(); void this.quotaState.refresh(true); });
+    this.quotaState = new QuotaController(ipc, () => this.render());
     this.controller = new ConversationController(
       id => ipc.invoke(protocol.READ_CHANNEL, {threadId:id}),
       changed => { if (changed) this.details.close(); this.render(); }
@@ -37,6 +39,7 @@ export class UsagePlugin {
     if (this.life.disposed) return;
     this.controller.select(this.dom.thread());
     void this.controller.refresh();
+    void this.quotaState.refresh();
   }
   render() {
     if (this.life.disposed || !document.body) return;
@@ -82,7 +85,8 @@ export class UsagePlugin {
         {key:'speed',kind:'session',turnId:id,text:speedLabel(turn)}
       ]);
     }
-    this.quota.render(snapshot, view.quota);
+    this.quotaState.useFallback(snapshot?.limits);
+    this.quota.render({limits:this.quotaState.limits}, view.quota);
     this.details.update(snapshot);
     this.dom.reconcile();
   }
@@ -110,6 +114,7 @@ export class UsagePlugin {
     ]});
     this.life.own(() => observer.disconnect());
     this.life.listen(window, 'resize', () => this.align());
+    this.life.listen(window, 'focus', () => { void this.quotaState.refresh(true); });
     this.life.listen(window, 'popstate', () => this.synchronize());
     this.life.listen(window, 'hashchange', () => this.synchronize());
     this.life.listen(document, 'pointerdown', event => { this.details.outside(event); this.quota.outside(event); }, {capture:true});
@@ -126,6 +131,7 @@ export class UsagePlugin {
     this.life.dispose();
     clearTimeout(this.renderTimer);
     this.controller.dispose();
+    this.quotaState.dispose();
     this.strip.dispose();
     for (const group of this.replies.values()) group.dispose();
     this.replies.clear();

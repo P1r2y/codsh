@@ -1,4 +1,4 @@
-// codsh-source-sha256:b18d845ff45e580766ec459790593dce63a5752c9f7f8b9e1b048cba550fd34d
+// codsh-source-sha256:4b8c7615acd920debeeb8071ee1c9ec2d2c164c61ff6d9b6a261227200abf946
 "use strict";
 (() => {
   var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -22,9 +22,10 @@
       "use strict";
       var READ_CHANNEL = "codex-usage-ui:read-v1";
       var STATE_CHANNEL = "codex-enhancement-loader:state-v1";
+      var NATIVE_FROM_VIEW = "codex_desktop:message-for-view";
       var UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
       var normalizeThreadId = (value) => typeof value === "string" && UUID.test(value) ? value.toLowerCase() : null;
-      module.exports = { READ_CHANNEL, STATE_CHANNEL, UUID, normalizeThreadId };
+      module.exports = { READ_CHANNEL, STATE_CHANNEL, NATIVE_FROM_VIEW, UUID, normalizeThreadId };
     }
   });
 

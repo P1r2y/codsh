@@ -1,4 +1,4 @@
-// codsh-source-sha256:b18d845ff45e580766ec459790593dce63a5752c9f7f8b9e1b048cba550fd34d
+// codsh-source-sha256:4b8c7615acd920debeeb8071ee1c9ec2d2c164c61ff6d9b6a261227200abf946
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -42,9 +42,10 @@
       "use strict";
       var READ_CHANNEL = "codex-usage-ui:read-v1";
       var STATE_CHANNEL = "codex-enhancement-loader:state-v1";
+      var NATIVE_FROM_VIEW = "codex_desktop:message-for-view";
       var UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
       var normalizeThreadId2 = (value) => typeof value === "string" && UUID.test(value) ? value.toLowerCase() : null;
-      module.exports = { READ_CHANNEL, STATE_CHANNEL, UUID, normalizeThreadId: normalizeThreadId2 };
+      module.exports = { READ_CHANNEL, STATE_CHANNEL, NATIVE_FROM_VIEW, UUID, normalizeThreadId: normalizeThreadId2 };
     }
   });
 
@@ -98,6 +99,46 @@
         return parts;
       }
       module.exports = { FIELDS, emptyUsage, number, clamp, usage, add, difference, statisticsFor: statisticsFor2, usageParts: usageParts2 };
+    }
+  });
+
+  // src/quota-model.cjs
+  var require_quota_model = __commonJS({
+    "src/quota-model.cjs"(exports, module) {
+      "use strict";
+      var { number, clamp } = require_usage_model();
+      var time = (value) => typeof value === "number" ? value < 1e12 ? value * 1e3 : value : Date.parse(value);
+      function normalizeLimits2(raw, observedAt = Date.now()) {
+        if (!raw) return null;
+        const groups = raw.rateLimitsByLimitId ?? raw.rate_limits_by_limit_id;
+        const candidates = groups ? Object.values(groups) : [raw.rateLimits ?? raw.rate_limits ?? raw];
+        const groupsOut = candidates.filter(Boolean).map((group) => {
+          const windows = ["primary", "secondary"].flatMap((kind) => {
+            const window2 = group[kind];
+            if (!window2) return [];
+            const used = number(window2.usedPercent ?? window2.used_percent);
+            const minutes = number(window2.windowDurationMins ?? window2.window_minutes);
+            const resetsAt = number(window2.resetsAt ?? window2.resets_at);
+            if (used === null || minutes === null || minutes === 0) return [];
+            return [{
+              kind,
+              usedPercent: clamp(used),
+              remainingPercent: clamp(100 - used),
+              windowMinutes: minutes,
+              resetsAt: resetsAt === null ? null : time(resetsAt),
+              label: minutes === 10080 ? "\u5468\u989D\u5EA6" : minutes === 300 ? "5 \u5C0F\u65F6\u989D\u5EA6" : `${minutes / 60} \u5C0F\u65F6\u989D\u5EA6`
+            }];
+          });
+          return { id: group.limitId ?? group.limit_id ?? "codex", name: group.limitName ?? group.limit_name ?? "Codex", windows };
+        }).filter((group) => group.windows.length);
+        return groupsOut.length ? { groups: groupsOut, observedAt } : null;
+      }
+      function quotaWindow(limits, now = Date.now()) {
+        const windows = limits?.groups?.flatMap((group) => group.windows.map((window2) => ({ ...window2, groupName: group.name }))) ?? [];
+        const current = windows.filter((window2) => window2.resetsAt == null || window2.resetsAt > now);
+        return (current.length ? current : windows).sort((a, b) => a.remainingPercent - b.remainingPercent || a.windowMinutes - b.windowMinutes)[0] ?? null;
+      }
+      module.exports = { normalizeLimits: normalizeLimits2, quotaWindow };
     }
   });
 
@@ -187,9 +228,78 @@
     }
   };
 
-  // src/ui/dom.mjs
+  // src/ui/quota-controller.mjs
   var import_protocol2 = __toESM(require_protocol(), 1);
-  var { normalizeThreadId } = import_protocol2.default;
+  var import_quota_model = __toESM(require_quota_model(), 1);
+  var { normalizeLimits } = import_quota_model.default;
+  var QuotaController = class {
+    constructor(ipc, onChange, now = Date.now) {
+      this.ipc = ipc;
+      this.onChange = onChange;
+      this.now = now;
+      this.native = null;
+      this.fallback = null;
+      this.accountChanged = false;
+      this.lastPoll = -Infinity;
+      this.inflight = false;
+      this.disposed = false;
+      this.listener = (_event, message) => this.receive(message);
+      ipc.on(import_protocol2.default.NATIVE_FROM_VIEW, this.listener);
+    }
+    get limits() {
+      return this.native ?? this.fallback;
+    }
+    useFallback(value) {
+      if (this.disposed || this.accountChanged || !value) return;
+      if (!this.fallback || (value.observedAt ?? 0) >= (this.fallback.observedAt ?? 0)) this.fallback = value;
+    }
+    receive(message) {
+      if (this.disposed || message?.hostId !== "local") return;
+      if (message.type === "mcp-notification" && message.method === "account/updated") {
+        this.native = null;
+        this.fallback = null;
+        this.accountChanged = true;
+        this.onChange();
+        return;
+      }
+      let raw;
+      if (message.type === "mcp-notification" && message.method === "account/rateLimits/updated") raw = message.params;
+      else if (message.type === "mcp-response" && !message.message?.error) {
+        const result = message.message?.result;
+        if (result?.rateLimits || result?.rateLimitsByLimitId || result?.rate_limits || result?.rate_limits_by_limit_id) raw = result;
+      }
+      const limits = normalizeLimits(raw, this.now());
+      if (!limits) return;
+      this.native = limits;
+      this.onChange();
+    }
+    async refresh(force = false) {
+      if (this.disposed || this.inflight || !force && this.now() - this.lastPoll < 3e4) return;
+      this.lastPoll = this.now();
+      this.inflight = true;
+      try {
+        const snapshot = await this.ipc.invoke(import_protocol2.default.READ_CHANNEL, { threadId: null });
+        if (this.disposed) return;
+        this.useFallback(snapshot?.limits);
+        this.onChange();
+      } catch (error) {
+        if (!this.disposed) console.warn("[CodexUsageUI]", String(error));
+      } finally {
+        this.inflight = false;
+      }
+    }
+    dispose() {
+      if (this.disposed) return;
+      this.disposed = true;
+      this.ipc.removeListener(import_protocol2.default.NATIVE_FROM_VIEW, this.listener);
+      this.native = null;
+      this.fallback = null;
+    }
+  };
+
+  // src/ui/dom.mjs
+  var import_protocol3 = __toESM(require_protocol(), 1);
+  var { normalizeThreadId } = import_protocol3.default;
   var OWN = ".cu-strip,.cu-turn,.cu-ring,.cu-tooltip,.cu-panel,#codex-usage-ui-style";
   function visible(node) {
     return node && node.getClientRects().length > 0 && node.closest('[aria-hidden="true"],[hidden],[inert]') == null && !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
@@ -702,6 +812,7 @@
   }
 
   // src/ui/quota.mjs
+  var import_quota_model2 = __toESM(require_quota_model(), 1);
   function createQuotaWidget(onOpen) {
     let snapshot = null, ring = null, ringButton = null, tooltip = null;
     let quotaHideTimer = null, quotaCloseTimer = null;
@@ -765,8 +876,7 @@
       }
     }
     function selectedWindow() {
-      const windows = snapshot?.limits?.groups?.flatMap((g) => g.windows.map((w) => ({ ...w, groupName: g.name }))) ?? [];
-      return windows.sort((a, b) => a.remainingPercent - b.remainingPercent || a.windowMinutes - b.windowMinutes)[0] ?? null;
+      return import_quota_model2.default.quotaWindow(snapshot?.limits);
     }
     function positionTooltip() {
       if (!tooltip || tooltip.hidden || !ring?.isConnected) return;
@@ -779,10 +889,11 @@
       const nodes = [];
       if (!snapshot?.limits) nodes.push(element("p", "", "\u6682\u65E0\u53EF\u7528\u989D\u5EA6\u6570\u636E"));
       for (const group of snapshot?.limits?.groups ?? []) for (const w of group.windows) {
+        const expired = w.resetsAt != null && w.resetsAt <= Date.now();
         const box = element("div", "cu-quota-detail");
         box.append(
           element("strong", "", `${group.name} \xB7 ${w.label}`),
-          element("p", "", `\u5269\u4F59 ${pct(w.remainingPercent)} \xB7 \u5DF2\u7528 ${pct(w.usedPercent)}`),
+          element("p", "", `\u5269\u4F59 ${pct(expired ? null : w.remainingPercent)} \xB7 \u5DF2\u7528 ${pct(expired ? null : w.usedPercent)}`),
           element("p", "", `\u8DDD\u91CD\u7F6E ${countdown(w.resetsAt == null ? null : w.resetsAt - Date.now())}`),
           element("p", "cu-muted", w.resetsAt == null ? "\u91CD\u7F6E\u65F6\u95F4\u4E0D\u53EF\u7528" : `\u5317\u4EAC\u65F6\u95F4 ${new Date(w.resetsAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}`)
         );
@@ -804,7 +915,7 @@
       if (!ring) makeRing();
       if (!tooltip.isConnected) document.body.append(tooltip);
       if (ring.parentNode !== mount.parent || ring.nextSibling !== mount.before) mount.parent.insertBefore(ring, mount.before);
-      const w = selectedWindow(), remain = w?.remainingPercent, expired = w?.resetsAt != null && w.resetsAt <= Date.now();
+      const w = selectedWindow(), expired = w?.resetsAt != null && w.resetsAt <= Date.now(), remain = expired ? null : w?.remainingPercent;
       const left = w?.resetsAt == null ? null : w.resetsAt - Date.now();
       const ratio = w && left != null ? Math.min(1, Math.max(0, left / (w.windowMinutes * 6e4))) : 0;
       const outer = ring.querySelector(".cu-remaining"), inner = ring.querySelector(".cu-time");
@@ -815,8 +926,8 @@
       inner.style.stroke = "#5ccbd9";
       inner.style.strokeDasharray = `${2 * Math.PI * 8}`;
       inner.style.strokeDashoffset = `${2 * Math.PI * 8 * (1 - ratio)}`;
-      setText(ring.querySelector("text"), shortTime(left));
-      ringButton.setAttribute("aria-label", w ? `${w.label}\u5269\u4F59 ${pct(remain)}\uFF0C\u8DDD\u91CD\u7F6E ${countdown(left)}` : "Codex \u989D\u5EA6\u6682\u4E0D\u53EF\u7528");
+      setText(ring.querySelector("text"), expired ? "\u2014" : shortTime(left));
+      ringButton.setAttribute("aria-label", expired ? "Codex \u989D\u5EA6\u5F85\u66F4\u65B0" : w ? `${w.label}\u5269\u4F59 ${pct(remain)}\uFF0C\u8DDD\u91CD\u7F6E ${countdown(left)}` : "Codex \u989D\u5EA6\u6682\u4E0D\u53EF\u7528");
       renderTooltip();
       positionTooltip();
     }
@@ -845,7 +956,7 @@
 
   // src/ui/app.mjs
   var import_usage_model2 = __toESM(require_usage_model(), 1);
-  var import_protocol3 = __toESM(require_protocol(), 1);
+  var import_protocol4 = __toESM(require_protocol(), 1);
 
   // src/ui/styles.css
   var styles_default = '.cu-strip,.cu-turn{font-family:var(--font-sans,var(--font-sans-default,"Segoe UI",sans-serif));font-size:var(--text-sm,12px);font-weight:400;line-height:20px;color:var(--color-text-secondary,var(--app-color-text-secondary,#979b9f));font-variant-numeric:tabular-nums;user-select:none}\r\n.cu-footer:has(.cu-strip){padding-bottom:0!important}\r\n.cu-strip{display:flex;align-items:center;align-content:center;justify-content:center;gap:0 8px;flex-wrap:wrap;min-height:var(--cu-strip-height,30px);padding:0 6px;margin:0;flex-shrink:0}\r\n.cu-strip>.cu-metric,.cu-turn>.cu-metric{display:flex;align-items:center;gap:5px;box-sizing:border-box;height:calc(var(--spacing,4px)*6);margin:0;padding:0 6px;white-space:nowrap;font:inherit;line-height:20px;border:0;border-radius:var(--radius-md,6px);color:inherit;background:transparent;cursor:pointer;outline-offset:2px;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}\r\n.cu-metric:hover,.cu-metric[aria-expanded=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-metric:focus-visible{outline:2px solid var(--color-ring,#79acfe)}\r\n.cu-metric>.cu-metric-label{display:block;margin:0;padding:0;border:0;font:inherit;font-weight:400;line-height:20px;letter-spacing:normal}\r\n.cu-strip svg,.cu-turn svg,.cu-panel svg{display:block;width:14px;height:14px;overflow:visible;stroke:currentColor;fill:none;stroke-width:1.5;flex-shrink:0}\r\n.cu-turn{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:5px 0 12px;min-width:0;clear:both}\r\n.cu-turn-inline{padding:0;margin-inline-start:6px;clear:none}.cu-action-row{column-gap:2px}\r\n.cu-action-row>.opacity-0{opacity:1!important}\r\n.cu-turn>span{white-space:nowrap}.cu-turn [data-cu-usage]{display:inline-flex;align-items:center;gap:4px}\r\n.cu-ring{width:36px;height:36px;min-height:36px;flex-shrink:0;display:flex;align-items:center;justify-content:center;align-self:center;margin:2px 0;position:relative}\r\n.cu-ring button{border:0;padding:2px;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;background:transparent;color:inherit;outline-offset:2px;transition:background-color .15s var(--ease-out,ease-out)}\r\n.cu-ring button:hover,.cu-ring button:focus-visible{background:var(--color-background-primary-ghost-hover,#ffffff12)}\r\n.cu-ring svg{width:32px;height:32px;overflow:visible}.cu-ring circle{fill:none;stroke-width:3;transform:rotate(-90deg);transform-origin:center;stroke-linecap:round;transition:stroke-dashoffset .35s var(--ease-out,ease-out),stroke .2s}\r\n.cu-ring .cu-track{stroke:currentColor;opacity:.12}.cu-ring text{fill:var(--color-text-secondary,var(--app-color-text-secondary,#a5abb3));font:6.5px "Segoe UI",sans-serif;text-anchor:middle;dominant-baseline:central}\r\n.cu-tooltip,.cu-panel{position:fixed;z-index:2147483647;box-sizing:border-box;min-width:min(280px,calc(100vw - 24px));max-width:min(380px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;padding:16px;border-radius:var(--radius-2xl,16px);background:color-mix(in srgb,var(--color-surface-elevated-secondary,#262626) 90%,transparent);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8));box-shadow:0 0 0 var(--dropdown-overlay-ring-width,.5px) var(--color-border-overlay,#ffffff26),var(--shadow-dropdown-overlay,0 8px 32px #0005);backdrop-filter:blur(var(--blur-sm,8px));border:0;font:400 var(--text-base,14px)/20px var(--font-sans,var(--font-sans-default,"Segoe UI",sans-serif));font-variant-numeric:tabular-nums;user-select:text;opacity:0;transform:translateY(4px) scale(.98);transform-origin:bottom center;transition:opacity .16s var(--ease-out,ease-out),transform .16s var(--ease-out,ease-out)}\r\n.cu-tooltip[data-state=open],.cu-panel[data-state=open]{opacity:1;transform:none}.cu-tooltip[hidden],.cu-panel[hidden]{display:none}.cu-tooltip[data-state=closed],.cu-panel[data-state=closed]{pointer-events:none}\r\n.cu-tooltip strong,.cu-panel strong{font:inherit;font-weight:600}.cu-tooltip p{margin:8px 0 0}.cu-muted,.cu-note{color:var(--color-text-secondary,#999)}.cu-tooltip .cu-muted,.cu-note{font-size:var(--text-sm,12px)}.cu-tooltip .cu-quota-detail+.cu-quota-detail{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:12px;padding-top:12px}\r\n.cu-panel-header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding-bottom:12px;margin-bottom:10px;border-bottom:1px solid var(--color-border-overlay,#ffffff26)}.cu-panel-heading{display:flex;align-items:center;gap:8px}.cu-panel-total{white-space:nowrap}.cu-stat-row{display:flex;align-items:baseline;justify-content:space-between;gap:24px;padding:4px 0}.cu-stat-label{color:var(--color-text-secondary,#999)}.cu-stat-value{text-align:right;overflow-wrap:anywhere}.cu-note{margin:10px 0 0;line-height:18px}.cu-context-track{height:5px;border-radius:99px;background:var(--color-background-primary-ghost-hover,#ffffff12);overflow:hidden;margin:4px 0 12px}.cu-context-fill{display:flex;height:100%;border-radius:inherit;overflow:hidden;transition:width .25s var(--ease-out,ease-out)}\r\n.cu-context-segment{display:block;flex:0 0 auto;height:100%;background:var(--cu-context-color);transition:width .25s var(--ease-out,ease-out)}.cu-context-uncached{--cu-context-color:var(--purple-400,#a78bfa)}.cu-context-cached{--cu-context-color:var(--blue-400,#60a5fa)}.cu-context-output{--cu-context-color:var(--green-400,#4ade80)}.cu-context-unknown{--cu-context-color:var(--color-text-tertiary,#878b93)}.cu-stat-row[data-cu-category]>.cu-stat-label{display:inline-flex;align-items:center;gap:8px}.cu-context-dot{display:inline-block;flex-shrink:0;width:8px;height:8px;border-radius:2px;background:var(--cu-context-color)}\r\n.cu-token-panel{font-size:var(--text-sm,12px);padding:14px}.cu-token-panel .cu-panel-header{gap:16px;padding-bottom:10px;margin-bottom:8px}.cu-model-views{display:flex;gap:4px;overflow-x:auto;max-width:100%;padding:0 0 8px;scrollbar-width:thin}.cu-model-view,.cu-model-summary{border:0;border-radius:var(--radius-md,6px);background:transparent;color:var(--color-text-secondary,#999);font:inherit;line-height:20px;cursor:pointer;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}.cu-model-view{flex:0 0 auto;padding:2px 7px;white-space:nowrap}.cu-model-view:hover,.cu-model-summary:hover,.cu-model-view[aria-pressed=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-model-view:focus-visible,.cu-model-summary:focus-visible{outline:2px solid var(--color-ring,#79acfe);outline-offset:-2px}.cu-model-list{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:8px;padding-top:6px}.cu-model-summary{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:4px 6px;text-align:left}.cu-model-summary>span:first-child{min-width:0;overflow-wrap:anywhere}.cu-model-summary>span:last-child{white-space:nowrap;color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}\r\n@media(max-width:620px){.cu-strip{gap:2px 4px}.cu-turn{gap:2px}}\r\n@media(prefers-reduced-motion:reduce){.cu-metric,.cu-ring button,.cu-ring circle,.cu-tooltip,.cu-panel,.cu-context-fill,.cu-context-segment,.cu-model-view,.cu-model-summary{transition:none}}\r\n';
@@ -858,9 +969,13 @@
       this.replies = /* @__PURE__ */ new Map();
       this.renderTimer = null;
       this.details = createDetailsPopover(() => this.quota.hide());
-      this.quota = createQuotaWidget(() => this.details.close());
+      this.quota = createQuotaWidget(() => {
+        this.details.close();
+        void this.quotaState.refresh(true);
+      });
+      this.quotaState = new QuotaController(ipc, () => this.render());
       this.controller = new ConversationController(
-        (id) => ipc.invoke(import_protocol3.default.READ_CHANNEL, { threadId: id }),
+        (id) => ipc.invoke(import_protocol4.default.READ_CHANNEL, { threadId: id }),
         (changed) => {
           if (changed) this.details.close();
           this.render();
@@ -881,6 +996,7 @@
       if (this.life.disposed) return;
       this.controller.select(this.dom.thread());
       void this.controller.refresh();
+      void this.quotaState.refresh();
     }
     render() {
       if (this.life.disposed || !document.body) return;
@@ -932,7 +1048,8 @@
           { key: "speed", kind: "session", turnId: id, text: speedLabel(turn) }
         ]);
       }
-      this.quota.render(snapshot, view.quota);
+      this.quotaState.useFallback(snapshot?.limits);
+      this.quota.render({ limits: this.quotaState.limits }, view.quota);
       this.details.update(snapshot);
       this.dom.reconcile();
     }
@@ -970,6 +1087,9 @@
       ] });
       this.life.own(() => observer.disconnect());
       this.life.listen(window, "resize", () => this.align());
+      this.life.listen(window, "focus", () => {
+        void this.quotaState.refresh(true);
+      });
       this.life.listen(window, "popstate", () => this.synchronize());
       this.life.listen(window, "hashchange", () => this.synchronize());
       this.life.listen(document, "pointerdown", (event) => {
@@ -994,6 +1114,7 @@
       this.life.dispose();
       clearTimeout(this.renderTimer);
       this.controller.dispose();
+      this.quotaState.dispose();
       this.strip.dispose();
       for (const group of this.replies.values()) group.dispose();
       this.replies.clear();

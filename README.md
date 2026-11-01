@@ -1,6 +1,6 @@
 # Agent 安装
 
-Windows；Codex `26.1013.40934` / `26.1021.31345`；Python ≥3.11。本地界面增强插件，非官方市场插件。
+Windows；Codex `26.1013.40934` / `26.1021.31345` / `26.1027.30824`；Python ≥3.11。本地界面增强插件，非官方市场插件。
 
 ```powershell
 git clone https://github.com/P1r2y/codsh.git
@@ -28,7 +28,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installation 'St
 
 不得强制终止用户进程。仅在用户要求时备份并修改桌面原「Codex」快捷方式，指向上述脚本，保留名称和图标，不新增定制版入口。
 
-验收：侧栏额度圆盘、输入框统计、回复同行用量、点击详情、模型切换；切换对话后数据和尾栏随之更新。日志缺项显示未知，不估造。数据读取本机 `CODEX_HOME`，默认 `~/.codex`；额度来自最近日志。
+验收：侧栏额度圆盘、输入框统计、回复同行用量、点击详情、模型切换；切换对话后数据和尾栏随之更新。日志缺项显示未知，不估造。数据读取本机 `CODEX_HOME`，默认 `~/.codex`；额度优先同步原生账户通知，全局日志备用，不依赖当前会话。
 
 ```powershell
 & (Join-Path $installation 'Disable-UsagePlugin.ps1') # 停用

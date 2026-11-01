@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('node:fs');
 const path=require('node:path');
-const {READ_CHANNEL:CHANNEL}=require('../src/protocol.cjs');
+const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW}=require('../src/protocol.cjs');
 
 function measureMetricGeometry(container) {
   if(!container)return null;
@@ -191,6 +191,21 @@ async function selfTest() {
     const replacedComposer=await adapterState();
     await win.webContents.executeJavaScript(`document.querySelector('[data-fixture-footer=replacement]').querySelectorAll('[data-above-composer-conversation-id]').forEach(node=>node.remove())`);
     await delay(250);const missingPortal=await adapterState();
+    const nativeLimits = (usedPercent, resetsAt=Math.floor(Date.now()/1000)+604800) => ({rateLimitsByLimitId:{codex:{limitId:'codex',primary:{usedPercent,windowDurationMins:10080,resetsAt}}}});
+    const quotaState=()=>win.webContents.executeJavaScript(`(()=>{const ring=document.querySelector('.cu-ring');return {label:ring.querySelector('button').getAttribute('aria-label'),offset:ring.querySelector('.cu-remaining').style.strokeDashoffset,text:document.querySelector('.cu-tooltip')?.textContent,errors:window.fixtureErrors??[]}})()`);
+    win.webContents.send(NATIVE_FROM_VIEW,{type:'mcp-response',hostId:'local',message:{id:'quota-read',result:nativeLimits(0)}});
+    await delay(150);const resetQuota=await quotaState();
+    fixture.snapshot.limits=structuredClone(fixture.snapshot.limits);
+    fixture.snapshot.limits.observedAt=Date.now()+86400000;
+    Object.assign(fixture.snapshot.limits.groups[0].windows[0],{usedPercent:83,remainingPercent:17});
+    await delay(2100);const protectedQuota=await quotaState();
+    win.webContents.send(NATIVE_FROM_VIEW,{type:'mcp-notification',hostId:'local',method:'account/rateLimits/updated',params:nativeLimits(42,Math.floor(Date.now()/1000)-1)});
+    await delay(150);
+    await win.webContents.executeJavaScript(`document.querySelector('.cu-ring').dispatchEvent(new MouseEvent('mouseenter'))`);await delay(180);
+    const expiredQuota=await quotaState();
+    win.webContents.send(NATIVE_FROM_VIEW,{type:'mcp-notification',hostId:'local',method:'account/rateLimits/updated',params:nativeLimits(0)});
+    await delay(150);const refreshedQuota=await quotaState();
+    fs.writeFileSync(output+'.quota-reset.png',(await win.webContents.capturePage()).toPNG());
     const checks={
       layout:!!report.strip&&report.stripHeight===46&&report.composerShift===8&&Math.abs(report.verticalCenterOffset)<.1,
       replies:report.footers===2&&report.replyStats.every(r=>!r.text.includes('≈')&&!/月|\d{2}:\d{2}/.test(r.text)&&r.hoverTitles===0&&r.inline),
@@ -226,7 +241,13 @@ async function selfTest() {
       replacedComposer:replacedComposer.strips===1&&replacedComposer.outsideForm&&replacedComposer.footer==='replacement'&&replacedComposer.hiddenStrips===0&&replacedComposer.thread===fixture.snapshot.threadId,
       missingPortal:missingPortal.thread===''&&!missingPortal.text.includes('tok')&&missingPortal.replies.length===0
     });
-    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,tooltipState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal}});
+    Object.assign(checks,{
+      nativeQuotaReset:resetQuota.label.includes('剩余 100%')&&resetQuota.offset==='0'&&resetQuota.errors.length===0,
+      nativeQuotaPriority:protectedQuota.label.includes('剩余 100%')&&protectedQuota.offset==='0',
+      expiredQuotaUnknown:expiredQuota.label.includes('待更新')&&expiredQuota.text.includes('剩余 —')&&!expiredQuota.text.includes('58%'),
+      quotaResetAgain:refreshedQuota.label.includes('剩余 100%')&&refreshedQuota.text.includes('剩余 100%')&&refreshedQuota.errors.length===0
+    });
+    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,tooltipState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
     win.destroy(); app.exit(0);
   } catch (e) { write({ok:false,error:String(e),stack:e.stack}); app.exit(1); }
 }

@@ -1,5 +1,6 @@
 import { element, setText } from './elements.mjs';
 import { pct, countdown, shortTime } from './format.mjs';
+import quotaModel from '../quota-model.cjs';
 
 export function createQuotaWidget(onOpen) {
   let snapshot = null, ring = null, ringButton = null, tooltip = null;
@@ -40,8 +41,7 @@ export function createQuotaWidget(onOpen) {
   }
 
   function selectedWindow() {
-    const windows = snapshot?.limits?.groups?.flatMap(g=>g.windows.map(w=>({...w,groupName:g.name}))) ?? [];
-    return windows.sort((a,b)=>a.remainingPercent-b.remainingPercent || a.windowMinutes-b.windowMinutes)[0] ?? null;
+    return quotaModel.quotaWindow(snapshot?.limits);
   }
 
   function positionTooltip() {
@@ -56,8 +56,9 @@ export function createQuotaWidget(onOpen) {
     const nodes=[];
     if (!snapshot?.limits) nodes.push(element('p','', '暂无可用额度数据'));
     for (const group of snapshot?.limits?.groups ?? []) for (const w of group.windows) {
+      const expired=w.resetsAt != null && w.resetsAt<=Date.now();
       const box=element('div','cu-quota-detail');box.append(element('strong','',`${group.name} · ${w.label}`),
-        element('p','',`剩余 ${pct(w.remainingPercent)} · 已用 ${pct(w.usedPercent)}`),
+        element('p','',`剩余 ${pct(expired?null:w.remainingPercent)} · 已用 ${pct(expired?null:w.usedPercent)}`),
         element('p','',`距重置 ${countdown(w.resetsAt == null ? null : w.resetsAt-Date.now())}`),
         element('p','cu-muted',w.resetsAt == null ? '重置时间不可用' : `北京时间 ${new Date(w.resetsAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})}`));nodes.push(box);
     }
@@ -70,7 +71,7 @@ export function createQuotaWidget(onOpen) {
     if (!ring) makeRing();
     if (!tooltip.isConnected) document.body.append(tooltip);
     if (ring.parentNode !== mount.parent || ring.nextSibling !== mount.before) mount.parent.insertBefore(ring, mount.before);
-    const w=selectedWindow(), remain=w?.remainingPercent, expired=w?.resetsAt != null && w.resetsAt<=Date.now();
+    const w=selectedWindow(), expired=w?.resetsAt != null && w.resetsAt<=Date.now(), remain=expired?null:w?.remainingPercent;
     const left=w?.resetsAt == null?null:w.resetsAt-Date.now();
     const ratio=w && left != null ? Math.min(1,Math.max(0,left/(w.windowMinutes*60000))) : 0;
     const outer=ring.querySelector('.cu-remaining'), inner=ring.querySelector('.cu-time');
@@ -78,8 +79,8 @@ export function createQuotaWidget(onOpen) {
     outer.style.strokeDasharray=`${2*Math.PI*13}`;outer.style.strokeDashoffset=`${2*Math.PI*13*(1-(remain??0)/100)}`;
     outer.style.opacity=remain==null || expired?'.45':'1';
     inner.style.stroke='#5ccbd9';inner.style.strokeDasharray=`${2*Math.PI*8}`;inner.style.strokeDashoffset=`${2*Math.PI*8*(1-ratio)}`;
-    setText(ring.querySelector('text'),shortTime(left));
-    ringButton.setAttribute('aria-label',w?`${w.label}剩余 ${pct(remain)}，距重置 ${countdown(left)}`:'Codex 额度暂不可用');
+    setText(ring.querySelector('text'),expired?'—':shortTime(left));
+    ringButton.setAttribute('aria-label',expired?'Codex 额度待更新':w?`${w.label}剩余 ${pct(remain)}，距重置 ${countdown(left)}`:'Codex 额度暂不可用');
     renderTooltip();positionTooltip();
   }
   return {

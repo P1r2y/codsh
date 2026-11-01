@@ -14,7 +14,7 @@ class InstallerTests(unittest.TestCase):
         return {
             'package.json':json.dumps({'version':version or install.VERSION, 'main':install.BRIDGE_MAIN}).encode(),
             install.BRIDGE_MAIN:b'require("electron");originalMain();',
-            install.BRIDGE_PRELOAD:b'require("electron");originalPreload();',
+            install.BRIDGE_PRELOAD:b'require("electron");originalPreload("codex_desktop:message-for-view");',
             'webview/assets/thread.js':('originalReact();'+','.join(install.NATIVE_MARKERS)).encode()
         }
 
@@ -67,6 +67,9 @@ class InstallerTests(unittest.TestCase):
             broken[install.BRIDGE_PRELOAD] = b'changedPreload();'
             self.archive(archive, broken)
             with self.assertRaisesRegex(RuntimeError, '加载入口结构不匹配'): install.validate_client(archive)
+            broken[install.BRIDGE_PRELOAD] = b'require("electron");changedNativeChannel();'
+            self.archive(archive, broken)
+            with self.assertRaisesRegex(RuntimeError, '原生额度通知入口不匹配'): install.validate_client(archive)
 
     def test_source_selection_uses_latest_original_without_downgrading(self):
         with tempfile.TemporaryDirectory(prefix='codsh-sources-') as folder:
@@ -83,7 +86,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(install.choose_source(candidates), candidates[-2])
             # 旧加载器没有外置配置，也不能当作原版再次叠加入口。
             self.archive(candidates[-2]/'resources/app.asar', {**self.entries(), '.vite/build/enhancement-loader.cjs':b'loader();'})
-            self.assertEqual(install.choose_source(candidates), candidates[0])
+            self.assertEqual(install.choose_source(candidates), candidates[-3])
             with self.assertRaisesRegex(RuntimeError, '已包含加载器'): install.validate_client(candidates[-2]/'resources/app.asar')
 
     def test_install_preserves_plugin_switch_and_other_plugins(self):
