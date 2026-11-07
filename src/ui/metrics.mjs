@@ -1,4 +1,5 @@
 import { element, setText, iconSvg } from './elements.mjs';
+import { MetricMotion } from './motion.mjs';
 
 const textMeasure = document.createElement('canvas').getContext('2d', {willReadFrequently:true});
 
@@ -47,12 +48,14 @@ export function alignMetrics(container) {
 }
 
 export class MetricGroup {
-  constructor(node, onActivate, onRemove) {
+  constructor(node, onActivate, onRemove, animated = false) {
     this.node = node;
     this.onActivate = onActivate;
     this.onRemove = onRemove;
+    this.motion = animated ? new MetricMotion(node) : null;
   }
   render(items) {
+    const previous = this.motion?.capture(), updated = new Set();
     const old = new Map([...this.node.children].map(node => [node.dataset.cuKey, node]));
     let changed = false;
     for (const text of [...this.node.childNodes]) if (text.nodeType === 3) { text.remove(); changed = true; }
@@ -67,7 +70,7 @@ export class MetricGroup {
       button.dataset.cuKind = item.kind;
       button.dataset.cuTurn = item.turnId ?? '';
       const label = button.querySelector('.cu-metric-label');
-      if (label.textContent !== item.text) { setText(label, item.text); changed = true; }
+      if (label.textContent !== item.text) { setText(label, item.text); updated.add(button); changed = true; }
       button.setAttribute('aria-label', `${item.text}，点击查看详情`);
       button.toggleAttribute('data-cu-live', item.live === true);
       if (this.node.children[index] !== button) {
@@ -76,14 +79,26 @@ export class MetricGroup {
       }
     });
     for (const button of old.values()) { this.onRemove(button); button.remove(); changed = true; }
-    if (changed) this.align();
+    if (changed) {
+      this.align();
+      this.motion?.update(previous, updated);
+    }
+  }
+  message(text) {
+    if (this.node.textContent === text) return;
+    this.onRemove(this.node);
+    this.motion?.cancel();
+    setText(this.node, text);
+    this.motion?.enter();
   }
   mount(parent, before = null) {
     if (this.node.parentNode !== parent || this.node.nextSibling !== before) {
       parent.insertBefore(this.node, before);
       this.align();
+      this.motion?.enter();
     }
   }
   align() { alignMetrics(this.node); }
-  dispose() { this.onRemove(this.node); this.node.remove(); }
+  unmount() { this.onRemove(this.node); this.motion?.cancel(); this.node.remove(); }
+  dispose() { this.unmount(); this.motion?.dispose(); }
 }

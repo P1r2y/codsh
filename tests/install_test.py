@@ -64,6 +64,10 @@ class InstallerTests(unittest.TestCase):
             self.archive(archive, broken)
             with self.assertRaisesRegex(RuntimeError, '原生界面结构不匹配'): install.validate_client(archive)
             broken = self.entries()
+            broken['webview/assets/thread.js'] = broken['webview/assets/thread.js'].replace(b'data-chatgpt-composer', b'changed-composer-mode')
+            self.archive(archive, broken)
+            with self.assertRaisesRegex(RuntimeError, '原生界面结构不匹配'): install.validate_client(archive)
+            broken = self.entries()
             broken[install.BRIDGE_PRELOAD] = b'changedPreload();'
             self.archive(archive, broken)
             with self.assertRaisesRegex(RuntimeError, '加载入口结构不匹配'): install.validate_client(archive)

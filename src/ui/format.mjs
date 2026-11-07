@@ -12,8 +12,3 @@ export function countdown(ms) {
   const m = Math.ceil(ms/60000), d = Math.floor(m/1440), h = Math.floor(m%1440/60);
   return d ? `${d}天 ${h}小时` : h ? `${h}小时 ${m%60}分` : `${m}分`;
 }
-
-export function shortTime(ms) {
-  if (ms == null) return '—'; if (ms <= 0) return '待刷新';
-  return ms >= 86400000 ? `${Math.ceil(ms/86400000)}天` : ms >= 3600000 ? `${Math.ceil(ms/3600000)}时` : `${Math.ceil(ms/60000)}分`;
-}

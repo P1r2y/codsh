@@ -1,4 +1,4 @@
-// codsh-source-sha256:4b8c7615acd920debeeb8071ee1c9ec2d2c164c61ff6d9b6a261227200abf946
+// codsh-source-sha256:6587df815f592902f7e53f7cf43cf56ca86f198018005b044a652a6268cb4ae9
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -300,7 +300,7 @@
   // src/ui/dom.mjs
   var import_protocol3 = __toESM(require_protocol(), 1);
   var { normalizeThreadId } = import_protocol3.default;
-  var OWN = ".cu-strip,.cu-turn,.cu-ring,.cu-tooltip,.cu-panel,#codex-usage-ui-style";
+  var OWN = ".cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style";
   function visible(node) {
     return node && node.getClientRects().length > 0 && node.closest('[aria-hidden="true"],[hidden],[inert]') == null && !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
   }
@@ -341,6 +341,9 @@
       const responses = [...(container ?? document).querySelectorAll("[data-response-annotation-conversation]")].filter(visible);
       return uniqueThread(responses, "data-response-annotation-conversation");
     }
+    chatMode(composer) {
+      return Boolean(composer?.matches("[data-chatgpt-composer]") || [...composer?.querySelectorAll("[data-chatgpt-composer]") ?? []].some(visible));
+    }
     scan(snapshot) {
       const composer = this.composer();
       const id = this.thread(composer);
@@ -356,7 +359,7 @@
         const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1) ?? [...root.querySelectorAll(".turn-action-controls")].filter((node) => visible(node) && !node.closest("[data-response-annotation-conversation]") && Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
         replies.set(key, { turn, parent: actions ?? response, inline: Boolean(actions) });
       }
-      return { id, composer, replies, quota: this.quotaMount() };
+      return { id, composer, chat: this.chatMode(composer), replies, quota: this.quotaMount() };
     }
     quotaMount() {
       const rail = [...document.querySelectorAll("[data-app-navigation-rail]")].find(visible);
@@ -430,6 +433,66 @@
     return svg;
   }
 
+  // src/ui/motion.mjs
+  var ease = "cubic-bezier(.2,.8,.2,1)";
+  var MetricMotion = class {
+    constructor(node) {
+      this.node = node;
+      this.animations = /* @__PURE__ */ new Map();
+      this.reduced = matchMedia("(prefers-reduced-motion: reduce)");
+      this.onPreference = () => this.cancel();
+      this.reduced.addEventListener("change", this.onPreference);
+    }
+    play(node, frames, duration = 220) {
+      this.animations.get(node)?.cancel();
+      if (this.reduced.matches || !node.isConnected) return;
+      const animation = node.animate(frames, { duration, easing: ease });
+      this.animations.set(node, animation);
+      const done = () => {
+        if (this.animations.get(node) === animation) this.animations.delete(node);
+      };
+      animation.addEventListener("finish", done, { once: true });
+      animation.addEventListener("cancel", done, { once: true });
+    }
+    capture() {
+      const origin = this.node.getBoundingClientRect();
+      return new Map([...this.node.children].map((node) => {
+        const rect = node.getBoundingClientRect();
+        return [node, { x: rect.x - origin.x, y: rect.y - origin.y }];
+      }));
+    }
+    enter() {
+      this.play(this.node, [{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }]);
+    }
+    update(previous, changed) {
+      for (const [node, animation] of this.animations) if (node !== this.node) {
+        animation.cancel();
+        this.animations.delete(node);
+      }
+      const positions = this.capture();
+      for (const [button, position] of positions) {
+        const old = previous.get(button);
+        if (!old) {
+          this.play(button, [{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }]);
+          continue;
+        }
+        const x = old.x - position.x, y = old.y - position.y;
+        if (Math.abs(x) > 0.5 || Math.abs(y) > 0.5) {
+          this.play(button, [{ transform: `translate(${x}px,${y}px)` }, { transform: "none" }]);
+        }
+        if (changed.has(button)) this.play(button.querySelector(".cu-metric-label"), [{ opacity: 0.45 }, { opacity: 1 }], 180);
+      }
+    }
+    cancel() {
+      for (const animation of this.animations.values()) animation.cancel();
+      this.animations.clear();
+    }
+    dispose() {
+      this.cancel();
+      this.reduced.removeEventListener("change", this.onPreference);
+    }
+  };
+
   // src/ui/metrics.mjs
   var textMeasure = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   function metric(icon, text, kind, turnId2, onActivate) {
@@ -489,12 +552,14 @@
     }
   }
   var MetricGroup = class {
-    constructor(node, onActivate, onRemove) {
+    constructor(node, onActivate, onRemove, animated = false) {
       this.node = node;
       this.onActivate = onActivate;
       this.onRemove = onRemove;
+      this.motion = animated ? new MetricMotion(node) : null;
     }
     render(items) {
+      const previous = this.motion?.capture(), updated = /* @__PURE__ */ new Set();
       const old = new Map([...this.node.children].map((node) => [node.dataset.cuKey, node]));
       let changed = false;
       for (const text of [...this.node.childNodes]) if (text.nodeType === 3) {
@@ -514,6 +579,7 @@
         const label = button.querySelector(".cu-metric-label");
         if (label.textContent !== item.text) {
           setText(label, item.text);
+          updated.add(button);
           changed = true;
         }
         button.setAttribute("aria-label", `${item.text}\uFF0C\u70B9\u51FB\u67E5\u770B\u8BE6\u60C5`);
@@ -528,20 +594,36 @@
         button.remove();
         changed = true;
       }
-      if (changed) this.align();
+      if (changed) {
+        this.align();
+        this.motion?.update(previous, updated);
+      }
+    }
+    message(text) {
+      if (this.node.textContent === text) return;
+      this.onRemove(this.node);
+      this.motion?.cancel();
+      setText(this.node, text);
+      this.motion?.enter();
     }
     mount(parent, before = null) {
       if (this.node.parentNode !== parent || this.node.nextSibling !== before) {
         parent.insertBefore(this.node, before);
         this.align();
+        this.motion?.enter();
       }
     }
     align() {
       alignMetrics(this.node);
     }
-    dispose() {
+    unmount() {
       this.onRemove(this.node);
+      this.motion?.cancel();
       this.node.remove();
+    }
+    dispose() {
+      this.unmount();
+      this.motion?.dispose();
     }
   };
 
@@ -560,11 +642,6 @@
     if (ms <= 0) return "\u7B49\u5F85\u5237\u65B0";
     const m = Math.ceil(ms / 6e4), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60);
     return d ? `${d}\u5929 ${h}\u5C0F\u65F6` : h ? `${h}\u5C0F\u65F6 ${m % 60}\u5206` : `${m}\u5206`;
-  }
-  function shortTime(ms) {
-    if (ms == null) return "\u2014";
-    if (ms <= 0) return "\u5F85\u5237\u65B0";
-    return ms >= 864e5 ? `${Math.ceil(ms / 864e5)}\u5929` : ms >= 36e5 ? `${Math.ceil(ms / 36e5)}\u65F6` : `${Math.ceil(ms / 6e4)}\u5206`;
   }
 
   // src/ui/details.mjs
@@ -814,8 +891,8 @@
   // src/ui/quota.mjs
   var import_quota_model2 = __toESM(require_quota_model(), 1);
   function createQuotaWidget(onOpen) {
-    let snapshot = null, ring = null, ringButton = null, tooltip = null;
-    let quotaHideTimer = null, quotaCloseTimer = null;
+    let snapshot = null, ring = null, ringButton = null, panel = null;
+    let closeTimer = null;
     function svgCircle(radius, className) {
       const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
       for (const [k, v] of Object.entries({ cx: 16, cy: 16, r: radius, class: className })) c.setAttribute(k, String(v));
@@ -826,66 +903,55 @@
       ringButton = element("button");
       ringButton.type = "button";
       ringButton.setAttribute("aria-label", "Codex \u5269\u4F59\u989D\u5EA6\u4E0E\u91CD\u7F6E\u65F6\u95F4");
-      ringButton.setAttribute("aria-describedby", "cu-quota-tooltip");
+      ringButton.setAttribute("aria-haspopup", "dialog");
+      ringButton.setAttribute("aria-expanded", "false");
+      ringButton.setAttribute("aria-controls", "cu-quota-popover");
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 32 32");
       svg.append(svgCircle(13, "cu-track"), svgCircle(13, "cu-remaining"), svgCircle(8, "cu-track"), svgCircle(8, "cu-time"));
-      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      text.setAttribute("x", "16");
-      text.setAttribute("y", "16");
-      svg.append(text);
+      svg.setAttribute("aria-hidden", "true");
       ringButton.append(svg);
       ring.append(ringButton);
-      tooltip = element("div", "cu-tooltip");
-      tooltip.id = "cu-quota-tooltip";
-      tooltip.role = "tooltip";
-      tooltip.hidden = true;
-      document.body.append(tooltip);
-      const show = () => {
-        clearTimeout(quotaHideTimer);
-        clearTimeout(quotaCloseTimer);
-        onOpen();
-        tooltip.dataset.state = "closed";
-        tooltip.hidden = false;
-        renderTooltip();
-        positionTooltip();
-        tooltip.dataset.state = "open";
-      };
-      const hide = () => {
-        clearTimeout(quotaHideTimer);
-        quotaHideTimer = setTimeout(() => {
-          if (tooltip && ring && !tooltip.matches(":hover") && !ring.matches(":hover") && document.activeElement !== ringButton) hideQuota();
-        }, 140);
-      };
-      ring.addEventListener("mouseenter", show);
-      ring.addEventListener("mouseleave", hide);
-      ringButton.addEventListener("focus", show);
-      ringButton.addEventListener("blur", hide);
-      ringButton.addEventListener("click", () => tooltip.hidden || tooltip.dataset.state === "closed" ? show() : hideQuota());
-      tooltip.addEventListener("mouseenter", () => clearTimeout(quotaHideTimer));
-      tooltip.addEventListener("mouseleave", hide);
+      panel = element("div", "cu-quota-panel");
+      panel.id = "cu-quota-popover";
+      panel.role = "dialog";
+      panel.setAttribute("aria-label", "Codex \u989D\u5EA6");
+      panel.hidden = true;
+      document.body.append(panel);
+      ringButton.addEventListener("click", () => panel.dataset.state === "open" ? hideQuota() : showQuota());
     }
-    function hideQuota() {
-      clearTimeout(quotaHideTimer);
-      clearTimeout(quotaCloseTimer);
-      if (tooltip) {
-        tooltip.dataset.state = "closed";
-        quotaCloseTimer = setTimeout(() => {
-          if (tooltip) tooltip.hidden = true;
-        }, 160);
-      }
+    function showQuota() {
+      clearTimeout(closeTimer);
+      onOpen();
+      panel.dataset.state = "closed";
+      panel.hidden = false;
+      renderPanel();
+      positionPanel();
+      panel.getBoundingClientRect();
+      panel.dataset.state = "open";
+      ringButton.setAttribute("aria-expanded", "true");
+    }
+    function hideQuota(immediate = false) {
+      clearTimeout(closeTimer);
+      ringButton?.setAttribute("aria-expanded", "false");
+      if (!panel) return;
+      panel.dataset.state = "closed";
+      if (immediate) panel.hidden = true;
+      else closeTimer = setTimeout(() => {
+        if (panel) panel.hidden = true;
+      }, 160);
     }
     function selectedWindow() {
       return import_quota_model2.default.quotaWindow(snapshot?.limits);
     }
-    function positionTooltip() {
-      if (!tooltip || tooltip.hidden || !ring?.isConnected) return;
-      const r = ring.getBoundingClientRect(), t = { width: tooltip.offsetWidth, height: tooltip.offsetHeight };
-      tooltip.style.left = `${Math.min(innerWidth - t.width - 12, Math.max(12, r.right + 10))}px`;
-      tooltip.style.top = `${Math.max(12, Math.min(r.top, innerHeight - t.height - 12))}px`;
+    function positionPanel() {
+      if (!panel || panel.hidden || !ring?.isConnected) return;
+      const r = ring.getBoundingClientRect(), t = { width: panel.offsetWidth, height: panel.offsetHeight };
+      panel.style.left = `${Math.min(innerWidth - t.width - 12, Math.max(12, r.right + 10))}px`;
+      panel.style.top = `${Math.max(12, Math.min(r.top, innerHeight - t.height - 12))}px`;
     }
-    function renderTooltip() {
-      if (!tooltip || tooltip.hidden) return;
+    function renderPanel() {
+      if (!panel || panel.hidden) return;
       const nodes = [];
       if (!snapshot?.limits) nodes.push(element("p", "", "\u6682\u65E0\u53EF\u7528\u989D\u5EA6\u6570\u636E"));
       for (const group of snapshot?.limits?.groups ?? []) for (const w of group.windows) {
@@ -900,20 +966,20 @@
         nodes.push(box);
       }
       const text = nodes.map((n) => n.textContent).join("|");
-      if (tooltip.dataset.content !== text) {
-        tooltip.replaceChildren(...nodes);
-        tooltip.dataset.content = text;
+      if (panel.dataset.content !== text) {
+        panel.replaceChildren(...nodes);
+        panel.dataset.content = text;
       }
     }
     function render(value, mount) {
       snapshot = value;
       if (!mount) {
         ring?.remove();
-        if (tooltip) tooltip.hidden = true;
+        hideQuota(true);
         return;
       }
       if (!ring) makeRing();
-      if (!tooltip.isConnected) document.body.append(tooltip);
+      if (!panel.isConnected) document.body.append(panel);
       if (ring.parentNode !== mount.parent || ring.nextSibling !== mount.before) mount.parent.insertBefore(ring, mount.before);
       const w = selectedWindow(), expired = w?.resetsAt != null && w.resetsAt <= Date.now(), remain = expired ? null : w?.remainingPercent;
       const left = w?.resetsAt == null ? null : w.resetsAt - Date.now();
@@ -926,30 +992,32 @@
       inner.style.stroke = "#5ccbd9";
       inner.style.strokeDasharray = `${2 * Math.PI * 8}`;
       inner.style.strokeDashoffset = `${2 * Math.PI * 8 * (1 - ratio)}`;
-      setText(ring.querySelector("text"), expired ? "\u2014" : shortTime(left));
       ringButton.setAttribute("aria-label", expired ? "Codex \u989D\u5EA6\u5F85\u66F4\u65B0" : w ? `${w.label}\u5269\u4F59 ${pct(remain)}\uFF0C\u8DDD\u91CD\u7F6E ${countdown(left)}` : "Codex \u989D\u5EA6\u6682\u4E0D\u53EF\u7528");
-      renderTooltip();
-      positionTooltip();
+      renderPanel();
+      positionPanel();
     }
     return {
       render,
       hide: hideQuota,
-      position: positionTooltip,
+      position: positionPanel,
       outside(event) {
-        if (tooltip && !tooltip.hidden && !ring?.contains(event.target) && !tooltip.contains(event.target)) hideQuota();
+        if (panel?.dataset.state === "open" && !ring?.contains(event.target) && !panel.contains(event.target)) hideQuota();
       },
       keydown(event) {
-        if (event.key === "Escape" && tooltip && !tooltip.hidden) hideQuota();
+        if (event.key === "Escape" && panel?.dataset.state === "open") {
+          event.preventDefault();
+          hideQuota();
+          ringButton?.focus({ preventScroll: true });
+        }
       },
       dispose() {
-        clearTimeout(quotaHideTimer);
-        clearTimeout(quotaCloseTimer);
+        clearTimeout(closeTimer);
         ring?.remove();
-        tooltip?.remove();
+        panel?.remove();
         snapshot = null;
         ring = null;
         ringButton = null;
-        tooltip = null;
+        panel = null;
       }
     };
   }
@@ -959,7 +1027,7 @@
   var import_protocol4 = __toESM(require_protocol(), 1);
 
   // src/ui/styles.css
-  var styles_default = '.cu-strip,.cu-turn{font-family:var(--font-sans,var(--font-sans-default,"Segoe UI",sans-serif));font-size:var(--text-sm,12px);font-weight:400;line-height:20px;color:var(--color-text-secondary,var(--app-color-text-secondary,#979b9f));font-variant-numeric:tabular-nums;user-select:none}\r\n.cu-footer:has(.cu-strip){padding-bottom:0!important}\r\n.cu-strip{display:flex;align-items:center;align-content:center;justify-content:center;gap:0 8px;flex-wrap:wrap;min-height:var(--cu-strip-height,30px);padding:0 6px;margin:0;flex-shrink:0}\r\n.cu-strip>.cu-metric,.cu-turn>.cu-metric{display:flex;align-items:center;gap:5px;box-sizing:border-box;height:calc(var(--spacing,4px)*6);margin:0;padding:0 6px;white-space:nowrap;font:inherit;line-height:20px;border:0;border-radius:var(--radius-md,6px);color:inherit;background:transparent;cursor:pointer;outline-offset:2px;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}\r\n.cu-metric:hover,.cu-metric[aria-expanded=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-metric:focus-visible{outline:2px solid var(--color-ring,#79acfe)}\r\n.cu-metric>.cu-metric-label{display:block;margin:0;padding:0;border:0;font:inherit;font-weight:400;line-height:20px;letter-spacing:normal}\r\n.cu-strip svg,.cu-turn svg,.cu-panel svg{display:block;width:14px;height:14px;overflow:visible;stroke:currentColor;fill:none;stroke-width:1.5;flex-shrink:0}\r\n.cu-turn{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:5px 0 12px;min-width:0;clear:both}\r\n.cu-turn-inline{padding:0;margin-inline-start:6px;clear:none}.cu-action-row{column-gap:2px}\r\n.cu-action-row>.opacity-0{opacity:1!important}\r\n.cu-turn>span{white-space:nowrap}.cu-turn [data-cu-usage]{display:inline-flex;align-items:center;gap:4px}\r\n.cu-ring{width:36px;height:36px;min-height:36px;flex-shrink:0;display:flex;align-items:center;justify-content:center;align-self:center;margin:2px 0;position:relative}\r\n.cu-ring button{border:0;padding:2px;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;background:transparent;color:inherit;outline-offset:2px;transition:background-color .15s var(--ease-out,ease-out)}\r\n.cu-ring button:hover,.cu-ring button:focus-visible{background:var(--color-background-primary-ghost-hover,#ffffff12)}\r\n.cu-ring svg{width:32px;height:32px;overflow:visible}.cu-ring circle{fill:none;stroke-width:3;transform:rotate(-90deg);transform-origin:center;stroke-linecap:round;transition:stroke-dashoffset .35s var(--ease-out,ease-out),stroke .2s}\r\n.cu-ring .cu-track{stroke:currentColor;opacity:.12}.cu-ring text{fill:var(--color-text-secondary,var(--app-color-text-secondary,#a5abb3));font:6.5px "Segoe UI",sans-serif;text-anchor:middle;dominant-baseline:central}\r\n.cu-tooltip,.cu-panel{position:fixed;z-index:2147483647;box-sizing:border-box;min-width:min(280px,calc(100vw - 24px));max-width:min(380px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;padding:16px;border-radius:var(--radius-2xl,16px);background:color-mix(in srgb,var(--color-surface-elevated-secondary,#262626) 90%,transparent);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8));box-shadow:0 0 0 var(--dropdown-overlay-ring-width,.5px) var(--color-border-overlay,#ffffff26),var(--shadow-dropdown-overlay,0 8px 32px #0005);backdrop-filter:blur(var(--blur-sm,8px));border:0;font:400 var(--text-base,14px)/20px var(--font-sans,var(--font-sans-default,"Segoe UI",sans-serif));font-variant-numeric:tabular-nums;user-select:text;opacity:0;transform:translateY(4px) scale(.98);transform-origin:bottom center;transition:opacity .16s var(--ease-out,ease-out),transform .16s var(--ease-out,ease-out)}\r\n.cu-tooltip[data-state=open],.cu-panel[data-state=open]{opacity:1;transform:none}.cu-tooltip[hidden],.cu-panel[hidden]{display:none}.cu-tooltip[data-state=closed],.cu-panel[data-state=closed]{pointer-events:none}\r\n.cu-tooltip strong,.cu-panel strong{font:inherit;font-weight:600}.cu-tooltip p{margin:8px 0 0}.cu-muted,.cu-note{color:var(--color-text-secondary,#999)}.cu-tooltip .cu-muted,.cu-note{font-size:var(--text-sm,12px)}.cu-tooltip .cu-quota-detail+.cu-quota-detail{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:12px;padding-top:12px}\r\n.cu-panel-header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding-bottom:12px;margin-bottom:10px;border-bottom:1px solid var(--color-border-overlay,#ffffff26)}.cu-panel-heading{display:flex;align-items:center;gap:8px}.cu-panel-total{white-space:nowrap}.cu-stat-row{display:flex;align-items:baseline;justify-content:space-between;gap:24px;padding:4px 0}.cu-stat-label{color:var(--color-text-secondary,#999)}.cu-stat-value{text-align:right;overflow-wrap:anywhere}.cu-note{margin:10px 0 0;line-height:18px}.cu-context-track{height:5px;border-radius:99px;background:var(--color-background-primary-ghost-hover,#ffffff12);overflow:hidden;margin:4px 0 12px}.cu-context-fill{display:flex;height:100%;border-radius:inherit;overflow:hidden;transition:width .25s var(--ease-out,ease-out)}\r\n.cu-context-segment{display:block;flex:0 0 auto;height:100%;background:var(--cu-context-color);transition:width .25s var(--ease-out,ease-out)}.cu-context-uncached{--cu-context-color:var(--purple-400,#a78bfa)}.cu-context-cached{--cu-context-color:var(--blue-400,#60a5fa)}.cu-context-output{--cu-context-color:var(--green-400,#4ade80)}.cu-context-unknown{--cu-context-color:var(--color-text-tertiary,#878b93)}.cu-stat-row[data-cu-category]>.cu-stat-label{display:inline-flex;align-items:center;gap:8px}.cu-context-dot{display:inline-block;flex-shrink:0;width:8px;height:8px;border-radius:2px;background:var(--cu-context-color)}\r\n.cu-token-panel{font-size:var(--text-sm,12px);padding:14px}.cu-token-panel .cu-panel-header{gap:16px;padding-bottom:10px;margin-bottom:8px}.cu-model-views{display:flex;gap:4px;overflow-x:auto;max-width:100%;padding:0 0 8px;scrollbar-width:thin}.cu-model-view,.cu-model-summary{border:0;border-radius:var(--radius-md,6px);background:transparent;color:var(--color-text-secondary,#999);font:inherit;line-height:20px;cursor:pointer;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}.cu-model-view{flex:0 0 auto;padding:2px 7px;white-space:nowrap}.cu-model-view:hover,.cu-model-summary:hover,.cu-model-view[aria-pressed=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-model-view:focus-visible,.cu-model-summary:focus-visible{outline:2px solid var(--color-ring,#79acfe);outline-offset:-2px}.cu-model-list{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:8px;padding-top:6px}.cu-model-summary{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:4px 6px;text-align:left}.cu-model-summary>span:first-child{min-width:0;overflow-wrap:anywhere}.cu-model-summary>span:last-child{white-space:nowrap;color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}\r\n@media(max-width:620px){.cu-strip{gap:2px 4px}.cu-turn{gap:2px}}\r\n@media(prefers-reduced-motion:reduce){.cu-metric,.cu-ring button,.cu-ring circle,.cu-tooltip,.cu-panel,.cu-context-fill,.cu-context-segment,.cu-model-view,.cu-model-summary{transition:none}}\r\n';
+  var styles_default = '.cu-strip,.cu-turn{font-family:var(--font-sans,var(--font-sans-default,"Segoe UI",sans-serif));font-size:var(--text-sm,12px);font-weight:400;line-height:20px;color:var(--color-text-secondary,var(--app-color-text-secondary,#979b9f));font-variant-numeric:tabular-nums;user-select:none}\n.cu-footer:has(.cu-strip){padding-bottom:0!important}\n.cu-strip{display:flex;align-items:center;align-content:center;justify-content:center;gap:0 8px;flex-wrap:wrap;min-height:var(--cu-strip-height,30px);padding:0 6px;margin:0;flex-shrink:0}\n.cu-strip>.cu-metric,.cu-turn>.cu-metric{display:flex;align-items:center;gap:5px;box-sizing:border-box;height:calc(var(--spacing,4px)*6);margin:0;padding:0 6px;white-space:nowrap;font:inherit;line-height:20px;border:0;border-radius:var(--radius-md,6px);color:inherit;background:transparent;cursor:pointer;outline-offset:2px;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}\n.cu-metric:hover,.cu-metric[aria-expanded=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-metric:focus-visible{outline:2px solid var(--color-ring,#79acfe)}\n.cu-metric>.cu-metric-label{display:block;margin:0;padding:0;border:0;font:inherit;font-weight:400;line-height:20px;letter-spacing:normal}\n.cu-strip svg,.cu-turn svg,.cu-panel svg{display:block;width:14px;height:14px;overflow:visible;stroke:currentColor;fill:none;stroke-width:1.5;flex-shrink:0}\n.cu-turn{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:5px 0 12px;min-width:0;clear:both}\n.cu-turn-inline{padding:0;margin-inline-start:6px;clear:none}.cu-action-row{column-gap:2px}\n.cu-action-row>.opacity-0{opacity:1!important}\n.cu-turn>span{white-space:nowrap}.cu-turn [data-cu-usage]{display:inline-flex;align-items:center;gap:4px}\n.cu-ring{width:36px;height:36px;min-height:36px;flex-shrink:0;display:flex;align-items:center;justify-content:center;align-self:center;margin:2px 0;position:relative}\n.cu-ring button{box-sizing:border-box;border:0;margin:0;padding:2px;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;background:transparent;color:inherit;outline-offset:2px;transition:background-color .15s var(--ease-out,ease-out)}\n.cu-ring button:hover,.cu-ring button:focus-visible,.cu-ring button[aria-expanded=true]{background:var(--color-background-primary-ghost-hover,#ffffff12)}\n.cu-ring svg{width:32px;height:32px;overflow:visible}.cu-ring circle{fill:none;stroke-width:3;transform:rotate(-90deg);transform-origin:center;stroke-linecap:round;transition:stroke-dashoffset .35s var(--ease-out,ease-out),stroke .2s}\n.cu-ring .cu-track{stroke:currentColor;opacity:.12}\n.cu-quota-panel,.cu-panel{position:fixed;z-index:2147483647;box-sizing:border-box;min-width:min(280px,calc(100vw - 24px));max-width:min(380px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;padding:16px;border-radius:var(--radius-2xl,16px);background:color-mix(in srgb,var(--color-surface-elevated-secondary,#262626) 90%,transparent);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8));box-shadow:0 0 0 var(--dropdown-overlay-ring-width,.5px) var(--color-border-overlay,#ffffff26),var(--shadow-dropdown-overlay,0 8px 32px #0005);backdrop-filter:blur(var(--blur-sm,8px));border:0;font:400 var(--text-base,14px)/20px var(--font-sans,var(--font-sans-default,"Segoe UI",sans-serif));font-variant-numeric:tabular-nums;user-select:text;opacity:0;transform:translateY(4px) scale(.98);transform-origin:bottom center;transition:opacity .16s var(--ease-out,ease-out),transform .16s var(--ease-out,ease-out)}\n.cu-quota-panel{transform:none;transition-property:opacity}\n.cu-quota-panel[data-state=open],.cu-panel[data-state=open]{opacity:1;transform:none}.cu-quota-panel[hidden],.cu-panel[hidden]{display:none}.cu-quota-panel[data-state=closed],.cu-panel[data-state=closed]{pointer-events:none}\n.cu-quota-panel strong,.cu-panel strong{font:inherit;font-weight:600}.cu-quota-panel p{margin:8px 0 0}.cu-muted,.cu-note{color:var(--color-text-secondary,#999)}.cu-quota-panel .cu-muted,.cu-note{font-size:var(--text-sm,12px)}.cu-quota-panel .cu-quota-detail+.cu-quota-detail{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:12px;padding-top:12px}\n.cu-panel-header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding-bottom:12px;margin-bottom:10px;border-bottom:1px solid var(--color-border-overlay,#ffffff26)}.cu-panel-heading{display:flex;align-items:center;gap:8px}.cu-panel-total{white-space:nowrap}.cu-stat-row{display:flex;align-items:baseline;justify-content:space-between;gap:24px;padding:4px 0}.cu-stat-label{color:var(--color-text-secondary,#999)}.cu-stat-value{text-align:right;overflow-wrap:anywhere}.cu-note{margin:10px 0 0;line-height:18px}.cu-context-track{height:5px;border-radius:99px;background:var(--color-background-primary-ghost-hover,#ffffff12);overflow:hidden;margin:4px 0 12px}.cu-context-fill{display:flex;height:100%;border-radius:inherit;overflow:hidden;transition:width .25s var(--ease-out,ease-out)}\n.cu-context-segment{display:block;flex:0 0 auto;height:100%;background:var(--cu-context-color);transition:width .25s var(--ease-out,ease-out)}.cu-context-uncached{--cu-context-color:var(--purple-400,#a78bfa)}.cu-context-cached{--cu-context-color:var(--blue-400,#60a5fa)}.cu-context-output{--cu-context-color:var(--green-400,#4ade80)}.cu-context-unknown{--cu-context-color:var(--color-text-tertiary,#878b93)}.cu-stat-row[data-cu-category]>.cu-stat-label{display:inline-flex;align-items:center;gap:8px}.cu-context-dot{display:inline-block;flex-shrink:0;width:8px;height:8px;border-radius:2px;background:var(--cu-context-color)}\n.cu-token-panel{font-size:var(--text-sm,12px);padding:14px}.cu-token-panel .cu-panel-header{gap:16px;padding-bottom:10px;margin-bottom:8px}.cu-model-views{display:flex;gap:4px;overflow-x:auto;max-width:100%;padding:0 0 8px;scrollbar-width:thin}.cu-model-view,.cu-model-summary{border:0;border-radius:var(--radius-md,6px);background:transparent;color:var(--color-text-secondary,#999);font:inherit;line-height:20px;cursor:pointer;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}.cu-model-view{flex:0 0 auto;padding:2px 7px;white-space:nowrap}.cu-model-view:hover,.cu-model-summary:hover,.cu-model-view[aria-pressed=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-model-view:focus-visible,.cu-model-summary:focus-visible{outline:2px solid var(--color-ring,#79acfe);outline-offset:-2px}.cu-model-list{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:8px;padding-top:6px}.cu-model-summary{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:4px 6px;text-align:left}.cu-model-summary>span:first-child{min-width:0;overflow-wrap:anywhere}.cu-model-summary>span:last-child{white-space:nowrap;color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}\n@media(max-width:620px){.cu-strip{gap:2px 4px}.cu-turn{gap:2px}}\n@media(prefers-reduced-motion:reduce){.cu-metric,.cu-ring button,.cu-ring circle,.cu-quota-panel,.cu-panel,.cu-context-fill,.cu-context-segment,.cu-model-view,.cu-model-summary{transition:none}}\n';
 
   // src/ui/app.mjs
   var UsagePlugin = class {
@@ -984,13 +1052,13 @@
       const strip = element("div", "cu-strip");
       strip.setAttribute("aria-label", "\u5F53\u524D\u5BF9\u8BDD\u7528\u91CF\u7EDF\u8BA1");
       strip.setAttribute("data-markdown-copy", "exclude");
-      this.strip = this.group(strip);
+      this.strip = this.group(strip, true);
       this.style = element("style");
       this.style.id = "codex-usage-ui-style";
       this.style.textContent = styles_default;
     }
-    group(node) {
-      return new MetricGroup(node, (button) => this.details.toggle(button), (node2) => this.details.remove(node2));
+    group(node, animated = false) {
+      return new MetricGroup(node, (button) => this.details.toggle(button), (node2) => this.details.remove(node2), animated);
     }
     synchronize() {
       if (this.life.disposed) return;
@@ -1006,13 +1074,13 @@
         this.synchronize();
         return;
       }
-      if (view.composer) {
+      if (view.composer && !view.chat) {
         this.dom.alignComposer(view.composer);
         this.strip.mount(view.composer);
         this.strip.node.dataset.cuThread = view.id ?? "";
         if (!snapshot?.available) {
           this.details.remove(this.strip.node);
-          setText(this.strip.node, view.id ? "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u7B49\u5F85\u672C\u5730\u4F1A\u8BDD\u6570\u636E" : "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u5F00\u59CB\u5BF9\u8BDD\u540E\u663E\u793A");
+          this.strip.message(view.id ? "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u7B49\u5F85\u672C\u5730\u4F1A\u8BDD\u6570\u636E" : "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u5F00\u59CB\u5BF9\u8BDD\u540E\u663E\u793A");
         } else {
           const items = [
             { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? []))}` },
@@ -1023,7 +1091,7 @@
           if (last && !last.completed) items.push({ key: "live", icon: "speed", kind: "live", text: `\u5F53\u524D ${last.averageTps?.toFixed(1) ?? "\u2014"} tok/s`, live: true });
           this.strip.render(items);
         }
-      } else this.strip.node.remove();
+      } else this.strip.unmount();
       for (const [id, group] of this.replies) if (!view.replies.has(id)) {
         group.dispose();
         this.replies.delete(id);
@@ -1054,7 +1122,8 @@
       this.dom.reconcile();
     }
     align() {
-      this.dom.alignComposer(this.dom.composer(), true);
+      const composer = this.dom.composer();
+      if (!this.dom.chatMode(composer)) this.dom.alignComposer(composer, true);
       this.strip.align();
       for (const group of this.replies.values()) group.align();
       this.details.position();
@@ -1081,6 +1150,7 @@
         "data-above-composer-conversation-id",
         "data-content-search-turn-key",
         "data-response-annotation-conversation",
+        "data-chatgpt-composer",
         "aria-hidden",
         "hidden",
         "inert"

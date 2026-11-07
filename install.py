@@ -24,7 +24,7 @@ BRIDGE_PRELOAD = '.vite/build/preload.js'
 NATIVE_MARKERS = (
     'data-thread-find-composer', 'data-thread-scroll-footer', 'data-above-composer-conversation-id',
     'data-content-search-turn-key', 'data-response-annotation-conversation', 'turn-action-controls',
-    'data-app-navigation-rail'
+    'data-app-navigation-rail', 'data-chatgpt-composer'
 )
 
 def read_header(p):

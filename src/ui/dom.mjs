@@ -1,7 +1,7 @@
 import protocol from '../protocol.cjs';
 
 const { normalizeThreadId } = protocol;
-const OWN = '.cu-strip,.cu-turn,.cu-ring,.cu-tooltip,.cu-panel,#codex-usage-ui-style';
+const OWN = '.cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style';
 
 export function visible(node) {
   return node && node.getClientRects().length > 0 &&
@@ -51,6 +51,10 @@ export class CodexDOM {
     const responses = [...(container ?? document).querySelectorAll('[data-response-annotation-conversation]')].filter(visible);
     return uniqueThread(responses, 'data-response-annotation-conversation');
   }
+  chatMode(composer) {
+    return Boolean(composer?.matches('[data-chatgpt-composer]') ||
+      [...(composer?.querySelectorAll('[data-chatgpt-composer]') ?? [])].some(visible));
+  }
   scan(snapshot) {
     const composer = this.composer();
     const id = this.thread(composer);
@@ -70,7 +74,7 @@ export class CodexDOM {
       // 同一轮只保留最后一条原生回复的操作栏；操作栏稍后出现时会移动同一个统计节点。
       replies.set(key, { turn, parent: actions ?? response, inline: Boolean(actions) });
     }
-    return { id, composer, replies, quota: this.quotaMount() };
+    return { id, composer, chat: this.chatMode(composer), replies, quota: this.quotaMount() };
   }
   quotaMount() {
     const rail = [...document.querySelectorAll('[data-app-navigation-rail]')].find(visible);
