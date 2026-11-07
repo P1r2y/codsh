@@ -55,7 +55,7 @@ export class MetricGroup {
     this.motion = animated ? new MetricMotion(node) : null;
   }
   render(items) {
-    const previous = this.motion?.capture(), updated = new Set();
+    const previous = this.motion?.capture();
     const old = new Map([...this.node.children].map(node => [node.dataset.cuKey, node]));
     let changed = false;
     for (const text of [...this.node.childNodes]) if (text.nodeType === 3) { text.remove(); changed = true; }
@@ -70,7 +70,8 @@ export class MetricGroup {
       button.dataset.cuKind = item.kind;
       button.dataset.cuTurn = item.turnId ?? '';
       const label = button.querySelector('.cu-metric-label');
-      if (label.textContent !== item.text) { setText(label, item.text); updated.add(button); changed = true; }
+      if (this.motion) changed = this.motion.text(label, item.text) || changed;
+      else if (label.textContent !== item.text) { setText(label, item.text); changed = true; }
       button.setAttribute('aria-label', `${item.text}，点击查看详情`);
       button.toggleAttribute('data-cu-live', item.live === true);
       if (this.node.children[index] !== button) {
@@ -81,7 +82,7 @@ export class MetricGroup {
     for (const button of old.values()) { this.onRemove(button); button.remove(); changed = true; }
     if (changed) {
       this.align();
-      this.motion?.update(previous, updated);
+      this.motion?.update(previous);
     }
   }
   message(text) {
@@ -93,9 +94,10 @@ export class MetricGroup {
   }
   mount(parent, before = null) {
     if (this.node.parentNode !== parent || this.node.nextSibling !== before) {
+      const entering = !this.node.isConnected || this.node.parentNode !== parent;
       parent.insertBefore(this.node, before);
       this.align();
-      this.motion?.enter();
+      if (entering) this.motion?.enter();
     }
   }
   align() { alignMetrics(this.node); }

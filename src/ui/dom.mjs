@@ -80,6 +80,9 @@ export class CodexDOM {
     const rail = [...document.querySelectorAll('[data-app-navigation-rail]')].find(visible);
     if (!rail) return null;
     const buttons = [...rail.querySelectorAll('button,[role="button"]')].filter(node => !node.closest(OWN));
+    const nativeQuota = buttons.find(node => node.querySelector('[data-transition-phase]') &&
+      !node.closest('[hidden],[aria-hidden="true"],[inert]'));
+    if (nativeQuota) return { parent:nativeQuota.parentElement, before:nativeQuota };
     let anchor = buttons.find(node => /^(下载|Downloads?)(?:\b|$)|查看下载/i.test(node.getAttribute('aria-label') ?? node.getAttribute('title') ?? '')) ?? buttons.at(-1);
     if (!anchor) return { parent: rail, before: null };
     while (anchor.parentElement !== rail && anchor.parentElement && !/column/.test(getComputedStyle(anchor.parentElement).flexDirection)) anchor = anchor.parentElement;

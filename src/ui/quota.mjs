@@ -2,6 +2,8 @@ import { element } from './elements.mjs';
 import { pct, countdown } from './format.mjs';
 import quotaModel from '../quota-model.cjs';
 
+const remainingRadius = 14, timeRadius = 10;
+
 export function createQuotaWidget(onOpen) {
   let snapshot = null, ring = null, ringButton = null, panel = null;
   let closeTimer = null;
@@ -17,7 +19,13 @@ export function createQuotaWidget(onOpen) {
     ringButton.setAttribute('aria-haspopup','dialog');ringButton.setAttribute('aria-expanded','false');
     ringButton.setAttribute('aria-controls','cu-quota-popover');
     const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 32 32');
-    svg.append(svgCircle(13,'cu-track'),svgCircle(13,'cu-remaining'),svgCircle(8,'cu-track'),svgCircle(8,'cu-time'));
+    svg.append(svgCircle(remainingRadius,'cu-track'),svgCircle(remainingRadius,'cu-remaining'),
+      svgCircle(timeRadius,'cu-track'),svgCircle(timeRadius,'cu-time'));
+    const symbol = document.createElementNS('http://www.w3.org/2000/svg','g');
+    symbol.setAttribute('transform','translate(16 16) scale(1.1428571429) translate(-6 -6)');symbol.setAttribute('class','cu-diamond');
+    const diamond = document.createElementNS('http://www.w3.org/2000/svg','path');
+    diamond.setAttribute('d','M5.00978 1.81069C5.55652 1.26395 6.44352 1.26395 6.99025 1.81069L10.1895 5.0099C10.7361 5.55665 10.7362 6.44367 10.1895 6.99037L6.99025 10.1896C6.44355 10.7363 5.55652 10.7362 5.00978 10.1896L1.81056 6.99037C1.26383 6.44364 1.26383 5.55664 1.81056 5.0099L5.00978 1.81069Z');
+    symbol.append(diamond);svg.append(symbol);
     svg.setAttribute('aria-hidden','true');ringButton.append(svg);ring.append(ringButton);
     panel = element('div','cu-quota-panel');panel.id='cu-quota-popover';panel.role='dialog';
     panel.setAttribute('aria-label','Codex 额度');panel.hidden=true;document.body.append(panel);
@@ -77,10 +85,11 @@ export function createQuotaWidget(onOpen) {
     const left=w?.resetsAt == null?null:w.resetsAt-Date.now();
     const ratio=w && left != null ? Math.min(1,Math.max(0,left/(w.windowMinutes*60000))) : 0;
     const outer=ring.querySelector('.cu-remaining'), inner=ring.querySelector('.cu-time');
-    outer.style.stroke=remain==null?'#8793a3':remain<=10?'#f26767':remain<=30?'#eeb866':'#79acfe';
-    outer.style.strokeDasharray=`${2*Math.PI*13}`;outer.style.strokeDashoffset=`${2*Math.PI*13*(1-(remain??0)/100)}`;
+    outer.style.stroke=remain==null?'var(--color-usage-meter-track,#72757c)':remain<=10?'var(--color-usage-meter-warning,#d87474)':remain<=30?'var(--color-usage-meter-warning,#c6a66f)':'var(--color-usage-meter-fill,#a2a6ad)';
+    outer.style.strokeDasharray=`${2*Math.PI*remainingRadius}`;outer.style.strokeDashoffset=`${2*Math.PI*remainingRadius*(1-(remain??0)/100)}`;
     outer.style.opacity=remain==null || expired?'.45':'1';
-    inner.style.stroke='#5ccbd9';inner.style.strokeDasharray=`${2*Math.PI*8}`;inner.style.strokeDashoffset=`${2*Math.PI*8*(1-ratio)}`;
+    inner.style.stroke='color-mix(in srgb,var(--color-usage-meter-fill,#a2a6ad) 60%,transparent)';
+    inner.style.strokeDasharray=`${2*Math.PI*timeRadius}`;inner.style.strokeDashoffset=`${2*Math.PI*timeRadius*(1-ratio)}`;
     ringButton.setAttribute('aria-label',expired?'Codex 额度待更新':w?`${w.label}剩余 ${pct(remain)}，距重置 ${countdown(left)}`:'Codex 额度暂不可用');
     renderPanel();positionPanel();
   }

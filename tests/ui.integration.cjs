@@ -2,7 +2,7 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW}=require('../src/protocol.cjs');
-const {quotaPresentation,modePresentation,watchMetricChanges}=require('./ui-presentation.cjs');
+const {quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation}=require('./ui-presentation.cjs');
 
 function measureMetricGeometry(container) {
   if(!container)return null;
@@ -51,6 +51,13 @@ async function selfTest() {
     const report = await win.webContents.executeJavaScript(alignmentScript);
     const shot = await win.webContents.capturePage(); fs.writeFileSync(output+'.png',shot.toPNG());
     const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='numbers') {
+      fixture.snapshot.turns.at(-1).completed=false;fixture.snapshot.turns.at(-1).averageTps=62.5;
+      await delay(2100);
+      const numbers=await numberPresentation(win,()=>{fixture.snapshot.turns.at(-1).averageTps=44.8;});
+      write({ok:Object.values(numbers.checks).every(Boolean),checks:numbers.checks,numberBehavior:numbers});
+      win.destroy();app.exit(0);return;
+    }
     const panelState=()=>win.webContents.executeJavaScript(`(()=>{const p=document.querySelector('.cu-panel'),s=p?getComputedStyle(p):null;return {visible:!!p&&!p.hidden&&p.dataset.state==='open',text:p?.textContent,opacity:s?.opacity,transition:s?.transitionDuration,expanded:document.querySelector('.cu-metric[aria-expanded=true]')?.dataset.cuKind}})()`);
     const clickMetric=async(selector,shotName)=>{
       await win.webContents.executeJavaScript(`document.querySelector(${JSON.stringify(selector)}).click()`);await delay(220);
@@ -111,6 +118,7 @@ async function selfTest() {
     await win.webContents.executeJavaScript(`document.body.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))`);await delay(200);
     const outsideState=await panelState();
     const quotaBehavior=await quotaPresentation(win),quotaPanelState=quotaBehavior.opened;
+    const nativeQuotaBehavior=await nativeQuotaPresentation(win);
     fs.writeFileSync(output+'.quota.png',(await win.webContents.capturePage()).toPNG());
     await watchMetricChanges(win);
     await win.webContents.executeJavaScript(`window.fixtureTokenAnchor=document.querySelector('.cu-strip [data-cu-kind=tokens]');window.fixtureTokenAnchor.click()`);await delay(220);
@@ -120,10 +128,11 @@ async function selfTest() {
     const liveState=await win.webContents.executeJavaScript(`({...${alignmentScript},live:document.querySelector('[data-cu-live]')?.textContent,stableAnchor:window.fixtureTokenAnchor===document.querySelector('.cu-strip [data-cu-kind=tokens]')})`);
     const livePanel=await panelState();
     const metricChanges=await win.webContents.executeJavaScript(`window.fixtureMetricChanges`);
+    const numberBehavior=await numberPresentation(win,()=>{fixture.snapshot.turns.at(-1).averageTps=44.8;});
     fixture.snapshot.turns.at(-1).completed=true;await delay(2100);
     const finishedState=await win.webContents.executeJavaScript(`({live:!!document.querySelector('[data-cu-live]'),footers:document.querySelectorAll('.cu-turn').length})`);
     pluginEnabled=false;await delay(2300);
-    const disabledState=await win.webContents.executeJavaScript(`({nodes:document.querySelectorAll('.cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel').length,nativeInset:parseFloat(getComputedStyle(document.querySelector('[data-thread-scroll-footer]')).paddingBottom),adjusted:document.querySelector('[data-thread-scroll-footer]').classList.contains('cu-footer'),actions:document.querySelectorAll('.cu-action-row').length})`);
+    const disabledState=await win.webContents.executeJavaScript(`({nodes:document.querySelectorAll('.cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel').length,nativeInset:parseFloat(getComputedStyle(document.querySelector('[data-thread-scroll-footer]')).paddingBottom),adjusted:document.querySelector('[data-thread-scroll-footer]').classList.contains('cu-footer'),actions:document.querySelectorAll('.cu-action-row').length,nativeQuota:document.querySelector('.native-usage').getClientRects().length>0})`);
     pluginEnabled=true;await delay(2300);
     const enabledState=await win.webContents.executeJavaScript(`({ring:!!document.querySelector('.cu-ring'),footers:document.querySelectorAll('.cu-turn').length})`);
     const modes=await modePresentation(win);
@@ -210,8 +219,8 @@ async function selfTest() {
     await delay(150);const refreshedQuota=await quotaState();
     fs.writeFileSync(output+'.quota-reset.png',(await win.webContents.capturePage()).toPNG());
     const checks={
-      ...quotaBehavior.checks,...modes.checks,
-      metricChanges:metricChanges.animations>0&&metricChanges.labelOpacity>.45&&metricChanges.labelOpacity<1&&metricChanges.moved&&metricChanges.added,
+      ...quotaBehavior.checks,...nativeQuotaBehavior.checks,...numberBehavior.checks,...modes.checks,
+      metricChanges:metricChanges.animations>0&&metricChanges.labelOpacity===1&&metricChanges.tweens>0&&metricChanges.moved&&metricChanges.added,
       layout:!!report.strip&&report.stripHeight===46&&report.composerShift===8&&Math.abs(report.verticalCenterOffset)<.1,
       replies:report.footers===2&&report.replyStats.every(r=>!r.text.includes('≈')&&!/月|\d{2}:\d{2}/.test(r.text)&&r.hoverTitles===0&&r.inline),
       nativeActions:report.replyStats.every(r=>r.nativeControls.length===4&&r.nativeControls.every(opacity=>opacity==='1')),
@@ -231,7 +240,7 @@ async function selfTest() {
       dismissal:!escapeState.visible&&!outsideState.visible,
       quota:report.ring&&quotaPanelState.visible&&quotaPanelState.text.includes('56%')&&!/Codex 额度|外环：|来源：/.test(quotaPanelState.text)&&quotaPanelState.radius==='16px'&&quotaPanelState.blur==='blur(8px)',
       live:liveState.live?.includes('62.5')&&liveState.footers===1&&liveState.stableAnchor&&livePanel.visible&&livePanel.text.includes('910,000 tok')&&!finishedState.live&&finishedState.footers===2,
-      lifecycle:disabledState.nodes===0&&disabledState.nativeInset===24&&!disabledState.adjusted&&disabledState.actions===0&&enabledState.ring&&enabledState.footers===2
+      lifecycle:disabledState.nodes===0&&disabledState.nativeInset===24&&!disabledState.adjusted&&disabledState.actions===0&&disabledState.nativeQuota&&enabledState.ring&&enabledState.footers===2
     };
     Object.assign(checks,{
       navigation:switched.strip.includes('1.8M tok')&&switched.visibleFooters===2&&switched.inline&&switched.hiddenFooters===0&&switched.turns.every(id=>second.turns.some(t=>t.id===id)),
@@ -252,7 +261,7 @@ async function selfTest() {
       expiredQuotaUnknown:expiredQuota.label.includes('待更新')&&expiredQuota.text.includes('剩余 —')&&!expiredQuota.text.includes('58%'),
       quotaResetAgain:refreshedQuota.label.includes('剩余 100%')&&refreshedQuota.text.includes('剩余 100%')&&refreshedQuota.errors.length===0
     });
-    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,quotaBehavior,modes,metricChanges,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,quotaPanelState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
+    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,quotaBehavior,nativeQuotaBehavior,numberBehavior,modes,metricChanges,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,quotaPanelState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
     win.destroy(); app.exit(0);
   } catch (e) { write({ok:false,error:String(e),stack:e.stack}); app.exit(1); }
 }
