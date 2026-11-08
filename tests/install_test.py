@@ -53,6 +53,14 @@ class InstallerTests(unittest.TestCase):
     def test_prebuilt_bundle_matches_sources(self):
         install.verify_bundles()
 
+    def test_native_markers_in_nested_assets_are_checked(self):
+        with tempfile.TemporaryDirectory(prefix='codsh-nested-') as folder:
+            archive = Path(folder)/'app.asar'
+            entries = self.entries()
+            entries['webview/assets/async/thread.js'] = entries.pop('webview/assets/thread.js')
+            self.archive(archive, entries)
+            self.assertEqual(install.validate_client(archive), install.VERSION)
+
     def test_each_declared_version_and_native_structure(self):
         with tempfile.TemporaryDirectory(prefix='codsh-compat-') as folder:
             archive = Path(folder)/'app.asar'

@@ -92,7 +92,12 @@ export class CodexDOM {
     const footer = composer?.closest('[data-thread-scroll-footer]');
     if (!footer || this.footers.has(footer) && !remeasure) return;
     footer.classList.remove('cu-footer');
-    const inset = parseFloat(getComputedStyle(footer).paddingBottom) || 0;
+    const padding = parseFloat(getComputedStyle(footer).paddingBottom) || 0;
+    const nativeAfter = footer.classList.contains('after:h-(--thread-composer-bottom-inset)')
+      ? getComputedStyle(footer, '::after') : null;
+    const after = nativeAfter && nativeAfter.display !== 'none' && nativeAfter.content !== 'none'
+      ? parseFloat(nativeAfter.height) || 0 : 0;
+    const inset = padding + after;
     footer.style.setProperty('--cu-strip-height', `${30 + Math.max(0, inset - 8)}px`);
     footer.classList.add('cu-footer');
     this.footers.add(footer);

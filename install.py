@@ -44,6 +44,13 @@ def read_entry(archive, header, offset, name):
         f.seek(offset + int(d['offset']))
         return f.read(d['size'])
 
+def archive_files(directory):
+    for name, record in directory.get('files', {}).items():
+        if 'files' in record:
+            yield from archive_files(record)
+        elif name.endswith('.js') and 'offset' in record:
+            yield record
+
 def put(root, name, value):
     d = root
     parts = name.split('/')
@@ -98,11 +105,10 @@ def validate_client(source):
         if name == BRIDGE_PRELOAD and b'codex_desktop:message-for-view' not in code:
             raise RuntimeError('原生额度通知入口不匹配，已停止安装')
     missing = {marker.encode() for marker in NATIVE_MARKERS}
-    try: assets = entry(header, 'webview/assets').get('files', {})
+    try: assets = entry(header, 'webview/assets')
     except KeyError: raise RuntimeError('原生界面资源缺失，已停止安装') from None
     with source.open('rb') as handle:
-        for name, record in assets.items():
-            if not name.endswith('.js') or 'offset' not in record: continue
+        for record in archive_files(assets):
             handle.seek(offset + int(record['offset']))
             code = handle.read(record['size'])
             missing.difference_update(marker for marker in tuple(missing) if marker in code)

@@ -2,7 +2,7 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW}=require('../src/protocol.cjs');
-const {quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation}=require('./ui-presentation.cjs');
+const {quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation,footerInsetPresentation}=require('./ui-presentation.cjs');
 
 function measureMetricGeometry(container) {
   if(!container)return null;
@@ -42,6 +42,10 @@ async function selfTest() {
     const win = new BrowserWindow({width:1200,height:820,show:false,webPreferences:{preload:path.join(__dirname,'../dist/enhancement-preload.cjs'),contextIsolation:true,sandbox:true,backgroundThrottling:false,offscreen:true}});
     await win.loadFile(path.join(__dirname,'fixture.html'));
     await new Promise(resolve=>setTimeout(resolve,2200));
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='layout') {
+      const layout=await footerInsetPresentation(win);
+      write({ok:Object.values(layout.checks).every(Boolean),...layout});win.destroy();app.exit(0);return;
+    }
     const alignmentScript=`(()=>{
       const strip=document.querySelector('.cu-strip'),rect=strip.getBoundingClientRect();
       const geometry=(${measureMetricGeometry.toString()})(strip);
@@ -136,6 +140,7 @@ async function selfTest() {
     pluginEnabled=true;await delay(2300);
     const enabledState=await win.webContents.executeJavaScript(`({ring:!!document.querySelector('.cu-ring'),footers:document.querySelectorAll('.cu-turn').length})`);
     const modes=await modePresentation(win);
+    const footerInset=await footerInsetPresentation(win);
     const secondId='00000000-0000-4000-8000-000000000002',second=structuredClone(fixture.snapshot);
     second.threadId=secondId;
     const doubleUsage=u=>Object.fromEntries(Object.entries(u).map(([key,value])=>[key,value*2]));
@@ -219,7 +224,7 @@ async function selfTest() {
     await delay(150);const refreshedQuota=await quotaState();
     fs.writeFileSync(output+'.quota-reset.png',(await win.webContents.capturePage()).toPNG());
     const checks={
-      ...quotaBehavior.checks,...nativeQuotaBehavior.checks,...numberBehavior.checks,...modes.checks,
+      ...quotaBehavior.checks,...nativeQuotaBehavior.checks,...numberBehavior.checks,...modes.checks,...footerInset.checks,
       metricChanges:metricChanges.animations>0&&metricChanges.labelOpacity===1&&metricChanges.tweens>0&&metricChanges.moved&&metricChanges.added,
       layout:!!report.strip&&report.stripHeight===46&&report.composerShift===8&&Math.abs(report.verticalCenterOffset)<.1,
       replies:report.footers===2&&report.replyStats.every(r=>!r.text.includes('≈')&&!/月|\d{2}:\d{2}/.test(r.text)&&r.hoverTitles===0&&r.inline),
@@ -261,7 +266,7 @@ async function selfTest() {
       expiredQuotaUnknown:expiredQuota.label.includes('待更新')&&expiredQuota.text.includes('剩余 —')&&!expiredQuota.text.includes('58%'),
       quotaResetAgain:refreshedQuota.label.includes('剩余 100%')&&refreshedQuota.text.includes('剩余 100%')&&refreshedQuota.errors.length===0
     });
-    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,quotaBehavior,nativeQuotaBehavior,numberBehavior,modes,metricChanges,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,quotaPanelState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
+    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,quotaBehavior,nativeQuotaBehavior,numberBehavior,modes,footerInset,metricChanges,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,quotaPanelState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
     win.destroy(); app.exit(0);
   } catch (e) { write({ok:false,error:String(e),stack:e.stack}); app.exit(1); }
 }

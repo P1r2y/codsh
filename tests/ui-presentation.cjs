@@ -2,6 +2,27 @@
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+async function footerInsetPresentation(win) {
+  const samples=[];
+  for(const inset of [0,8,16,24]) {
+    await win.webContents.executeJavaScript(`(()=>{const footer=document.querySelector('[data-thread-scroll-footer]');footer.dataset.fixtureAfterInset='';footer.classList.add('after:h-(--thread-composer-bottom-inset)');footer.style.setProperty('--thread-composer-bottom-inset','${inset}px');window.dispatchEvent(new Event('resize'));})()`);
+    await delay(250);
+    samples.push(await win.webContents.executeJavaScript(`(()=>{const footer=document.querySelector('[data-thread-scroll-footer]'),composer=document.querySelector('.composer').getBoundingClientRect(),strip=document.querySelector('.cu-strip').getBoundingClientRect(),bottom=footer.getBoundingClientRect().bottom;return {inset:${inset},after:parseFloat(getComputedStyle(footer,'::after').height),stripHeight:strip.height,offset:strip.top+strip.height/2-(composer.bottom+bottom)/2};})()`));
+  }
+  await win.webContents.executeJavaScript(`(()=>{const footer=document.querySelector('[data-thread-scroll-footer]');footer.classList.remove('after:h-(--thread-composer-bottom-inset)');window.dispatchEvent(new Event('resize'));})()`);
+  await delay(250);
+  const otherAfter=await win.webContents.executeJavaScript(`parseFloat(getComputedStyle(document.querySelector('[data-thread-scroll-footer]'),'::after').height)`);
+  await win.webContents.executeJavaScript(`(()=>{const footer=document.querySelector('[data-thread-scroll-footer]');footer.classList.add('after:h-(--thread-composer-bottom-inset)');window.dispatchEvent(new Event('resize'));document.querySelector('[data-thread-find-composer]').setAttribute('data-chatgpt-composer','');})()`);
+  await delay(400);
+  const chat=await win.webContents.executeJavaScript(`(()=>{const footer=document.querySelector('[data-thread-scroll-footer]');return {after:parseFloat(getComputedStyle(footer,'::after').height),strip:!!footer.querySelector('.cu-strip'),adjusted:footer.classList.contains('cu-footer')};})()`);
+  await win.webContents.executeJavaScript(`(()=>{const footer=document.querySelector('[data-thread-scroll-footer]');delete footer.dataset.fixtureAfterInset;footer.classList.remove('after:h-(--thread-composer-bottom-inset)');footer.style.removeProperty('--thread-composer-bottom-inset');document.querySelector('[data-thread-find-composer]').removeAttribute('data-chatgpt-composer');})()`);
+  await delay(400);
+  return {samples,otherAfter,chat,checks:{
+    nativeFooterCentered:samples.every(s=>Math.abs(s.offset)<.1&&s.after===0),
+    nativeFooterRestore:otherAfter===24&&chat.after===24&&!chat.strip&&!chat.adjusted
+  }};
+}
+
 async function quotaPresentation(win) {
   await win.webContents.executeJavaScript(`(() => {
     const button=document.querySelector('.cu-ring button');button.focus();
@@ -181,4 +202,4 @@ async function numberPresentation(win, update) {
   }};
 }
 
-module.exports={quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation};
+module.exports={quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation,footerInsetPresentation};
