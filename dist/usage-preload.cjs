@@ -1,4 +1,4 @@
-// codsh-source-sha256:885c7d81b124d88c721830da4297ae0039da219d8780a6ce8e9bab13cd51f12e
+// codsh-source-sha256:1bcdf44aa101967489790fa725c0514b8e53e486ed025d9a6f71e398a24ed1f1
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -301,6 +301,10 @@
   var import_protocol3 = __toESM(require_protocol(), 1);
   var { normalizeThreadId } = import_protocol3.default;
   var OWN = ".cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style";
+  var MARKERS = "[data-thread-find-composer],[data-thread-scroll-footer],[data-above-composer-conversation-id],[data-content-search-turn-key],[data-response-annotation-conversation],.turn-action-controls,[data-app-navigation-rail],[data-transition-phase],[data-chatgpt-composer]";
+  function structural(node) {
+    return node.nodeType === 1 && !node.closest(OWN) && (node.matches(MARKERS) || node.querySelector(MARKERS) !== null);
+  }
   function visible(node) {
     return node && node.getClientRects().length > 0 && node.closest('[aria-hidden="true"],[hidden],[inert]') == null && !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
   }
@@ -349,13 +353,17 @@
       const id = this.thread(composer);
       const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map((turn) => [turn.id, turn]));
       const replies = /* @__PURE__ */ new Map();
+      const latest = /* @__PURE__ */ new Map();
       for (const response of document.querySelectorAll("[data-response-annotation-conversation]")) {
-        if (!visible(response) || normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) continue;
+        if (normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id || !visible(response)) continue;
         let root = response.closest("[data-content-search-turn-key]");
         let key = null;
         while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest("[data-content-search-turn-key]");
         const turn = turns.get(key);
         if (!turn?.completed) continue;
+        latest.set(key, { turn, response, root });
+      }
+      for (const [key, { turn, response, root }] of latest) {
         const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1) ?? [...root.querySelectorAll(".turn-action-controls")].filter((node) => visible(node) && !node.closest("[data-response-annotation-conversation]") && Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
         replies.set(key, { turn, parent: actions ?? response, inline: Boolean(actions) });
       }
@@ -402,7 +410,14 @@
       }
     }
     relevant(records) {
-      return records.some((record) => !(record.target.nodeType === 1 && record.target.closest(OWN)));
+      return records.some((record) => {
+        const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+        if (target?.closest(OWN)) return false;
+        if (record.type === "attributes") {
+          return !["hidden", "aria-hidden", "inert"].includes(record.attributeName) || structural(target);
+        }
+        return [...record.addedNodes, ...record.removedNodes].some(structural);
+      });
     }
     dispose() {
       for (const footer of this.footers) {
@@ -636,8 +651,12 @@
       this.onActivate = onActivate;
       this.onRemove = onRemove;
       this.motion = animated ? new MetricMotion(node) : null;
+      this.contentKey = null;
     }
     render(items) {
+      const contentKey = JSON.stringify(items.map((item) => [item.key, item.icon, item.kind, item.turnId, item.text, item.live === true]));
+      if (contentKey === this.contentKey) return;
+      this.contentKey = contentKey;
       const previous = this.motion?.capture();
       const old = new Map([...this.node.children].map((node) => [node.dataset.cuKey, node]));
       let changed = false;
@@ -680,6 +699,7 @@
     }
     message(text) {
       if (this.node.textContent === text) return;
+      this.contentKey = null;
       this.onRemove(this.node);
       this.motion?.cancel();
       setText(this.node, text);
@@ -1230,15 +1250,13 @@
       document.documentElement.dataset.cuUi = "ready";
       const observer = new MutationObserver((records) => {
         if (!this.dom.relevant(records)) return;
-        if (this.dom.thread() !== this.controller.threadId) {
-          this.synchronize();
-          return;
-        }
         if (this.renderTimer) return;
+        const urgent = records.some((record) => record.type === "attributes");
         this.renderTimer = setTimeout(() => {
           this.renderTimer = null;
-          this.render();
-        }, 180);
+          if (this.dom.thread() !== this.controller.threadId) this.synchronize();
+          else this.render();
+        }, urgent ? 0 : 80);
       });
       observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: [
         "data-above-composer-conversation-id",

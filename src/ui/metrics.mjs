@@ -53,8 +53,12 @@ export class MetricGroup {
     this.onActivate = onActivate;
     this.onRemove = onRemove;
     this.motion = animated ? new MetricMotion(node) : null;
+    this.contentKey = null;
   }
   render(items) {
+    const contentKey = JSON.stringify(items.map(item => [item.key,item.icon,item.kind,item.turnId,item.text,item.live === true]));
+    if (contentKey === this.contentKey) return;
+    this.contentKey = contentKey;
     const previous = this.motion?.capture();
     const old = new Map([...this.node.children].map(node => [node.dataset.cuKey, node]));
     let changed = false;
@@ -87,6 +91,7 @@ export class MetricGroup {
   }
   message(text) {
     if (this.node.textContent === text) return;
+    this.contentKey = null;
     this.onRemove(this.node);
     this.motion?.cancel();
     setText(this.node, text);

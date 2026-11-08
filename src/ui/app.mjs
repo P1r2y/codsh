@@ -105,9 +105,13 @@ export class UsagePlugin {
     document.documentElement.dataset.cuUi = 'ready';
     const observer = new MutationObserver(records => {
       if (!this.dom.relevant(records)) return;
-      if (this.dom.thread() !== this.controller.threadId) { this.synchronize(); return; }
       if (this.renderTimer) return;
-      this.renderTimer = setTimeout(() => { this.renderTimer = null; this.render(); }, 180);
+      const urgent = records.some(record => record.type === 'attributes');
+      this.renderTimer = setTimeout(() => {
+        this.renderTimer = null;
+        if (this.dom.thread() !== this.controller.threadId) this.synchronize();
+        else this.render();
+      }, urgent ? 0 : 80);
     });
     observer.observe(document.body, {childList:true,subtree:true,attributes:true,attributeFilter:[
       'data-above-composer-conversation-id','data-content-search-turn-key',

@@ -2,6 +2,14 @@ import protocol from '../protocol.cjs';
 
 const { normalizeThreadId } = protocol;
 const OWN = '.cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style';
+const MARKERS = '[data-thread-find-composer],[data-thread-scroll-footer],[data-above-composer-conversation-id],'+
+  '[data-content-search-turn-key],[data-response-annotation-conversation],.turn-action-controls,'+
+  '[data-app-navigation-rail],[data-transition-phase],[data-chatgpt-composer]';
+
+function structural(node) {
+  return node.nodeType === 1 && !node.closest(OWN) &&
+    (node.matches(MARKERS) || node.querySelector(MARKERS) !== null);
+}
 
 export function visible(node) {
   return node && node.getClientRects().length > 0 &&
@@ -60,13 +68,17 @@ export class CodexDOM {
     const id = this.thread(composer);
     const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map(turn => [turn.id, turn]));
     const replies = new Map();
+    const latest = new Map();
     for (const response of document.querySelectorAll('[data-response-annotation-conversation]')) {
-      if (!visible(response) || normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id) continue;
+      if (normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id || !visible(response)) continue;
       let root = response.closest('[data-content-search-turn-key]');
       let key = null;
       while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest('[data-content-search-turn-key]');
       const turn = turns.get(key);
       if (!turn?.completed) continue;
+      latest.set(key, {turn, response, root});
+    }
+    for (const [key, {turn, response, root}] of latest) {
       const actions = [...response.querySelectorAll('.turn-action-controls')].filter(visible).at(-1) ??
         [...root.querySelectorAll('.turn-action-controls')].filter(node => visible(node) &&
           !node.closest('[data-response-annotation-conversation]') &&
@@ -120,7 +132,14 @@ export class CodexDOM {
     }
   }
   relevant(records) {
-    return records.some(record => !(record.target.nodeType === 1 && record.target.closest(OWN)));
+    return records.some(record => {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      if (target?.closest(OWN)) return false;
+      if (record.type === 'attributes') {
+        return !['hidden','aria-hidden','inert'].includes(record.attributeName) || structural(target);
+      }
+      return [...record.addedNodes, ...record.removedNodes].some(structural);
+    });
   }
   dispose() {
     for (const footer of this.footers) {

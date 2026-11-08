@@ -3,6 +3,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW}=require('../src/protocol.cjs');
 const {quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation,footerInsetPresentation}=require('./ui-presentation.cjs');
+const {performancePresentation}=require('./ui-performance.cjs');
 
 function measureMetricGeometry(container) {
   if(!container)return null;
@@ -32,7 +33,15 @@ async function selfTest() {
     const fixture = JSON.parse(fs.readFileSync(path.join(__dirname,'fixture.json'),'utf8'));
     const snapshots=new Map([[fixture.snapshot.threadId,fixture.snapshot]]),responseDelays=new Map();
     let pluginEnabled=true;
-    const pluginCode=fs.readFileSync(path.join(__dirname,'../dist/usage-preload.cjs'),'utf8');
+    let pluginCode=fs.readFileSync(path.join(__dirname,'../dist/usage-preload.cjs'),'utf8');
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance')pluginCode=`(()=>{
+      let active=false,scans=0,layouts=0;
+      const query=Document.prototype.querySelectorAll,rects=Element.prototype.getClientRects;
+      Document.prototype.querySelectorAll=function(selector){if(active&&this===document&&selector==='[data-thread-find-composer]')scans++;return query.call(this,selector);};
+      Element.prototype.getClientRects=function(){if(active)layouts++;return rects.call(this);};
+      document.addEventListener('codsh-performance-start',()=>{scans=0;layouts=0;active=true;});
+      document.addEventListener('codsh-performance-read',()=>{active=false;document.documentElement.dataset.fixturePerformance=JSON.stringify({scans,layouts});});
+    })();\n`+pluginCode;
     ipcMain.handle('codex-enhancement-loader:state-v1',()=>({enabled:pluginEnabled,key:'fixture',code:pluginCode}));
     ipcMain.handle(CHANNEL,async(_event,request)=>{
       const id=request?.threadId,delay=responseDelays.get(id)??0;
@@ -42,6 +51,10 @@ async function selfTest() {
     const win = new BrowserWindow({width:1200,height:820,show:false,webPreferences:{preload:path.join(__dirname,'../dist/enhancement-preload.cjs'),contextIsolation:true,sandbox:true,backgroundThrottling:false,offscreen:true}});
     await win.loadFile(path.join(__dirname,'fixture.html'));
     await new Promise(resolve=>setTimeout(resolve,2200));
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance') {
+      const performance=await performancePresentation(win);
+      write({ok:Object.values(performance.checks).every(Boolean),...performance});win.destroy();app.exit(0);return;
+    }
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='layout') {
       const layout=await footerInsetPresentation(win);
       write({ok:Object.values(layout.checks).every(Boolean),...layout});win.destroy();app.exit(0);return;
