@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -113,6 +115,35 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(actual['loaderVersion'], install.MANIFEST['loaderVersion'])
             self.assertEqual(actual['plugins'], original['plugins'])
             self.assertEqual(actual['extra'], 7)
+            self.assertEqual((destination/'plugins/codex-usage/lib/project-cache.cjs').read_bytes(),
+                             (install.ROOT/'src/project-cache.cjs').read_bytes())
+            for name in ['project-cache-worker.cjs', 'log-watch.cjs']:
+                self.assertEqual((destination/'plugins/codex-usage/lib'/name).read_bytes(),
+                                 (install.ROOT/'src'/name).read_bytes())
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows launcher')
+    def test_pending_enable_is_one_shot_and_explicit_disable_cancels_it(self):
+        with tempfile.TemporaryDirectory(prefix='codsh-launch-') as folder:
+            destination = Path(folder)
+            install.install_controls(destination)
+            settings = destination/'plugins.json'
+            settings.write_text(json.dumps({'plugins':{'codex-usage':{'enabled':False}}}), encoding='utf-8')
+            (destination/'installation.json').write_text(json.dumps({'runtime':str(destination/'runtime'/'app')}), encoding='utf-8')
+            pending = destination/'enable-on-next-start.flag'
+            pending.write_text('', encoding='utf-8')
+            environment = dict(os.environ, CODSH_TEST_DIR=str(destination))
+            script = r'''function Get-CimInstance { param($Filter) @() }
+function Start-Process { param($FilePath,$WorkingDirectory,$WindowStyle) }
+& (Join-Path $env:CODSH_TEST_DIR 'Start-CodexUsageUI.ps1')'''
+            subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+                           env=environment, check=True, capture_output=True)
+            self.assertTrue(json.loads(settings.read_text(encoding='utf-8'))['plugins']['codex-usage']['enabled'])
+            self.assertFalse(pending.exists())
+            pending.write_text('', encoding='utf-8')
+            subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                            str(destination/'Disable-UsagePlugin.ps1')], check=True, capture_output=True)
+            self.assertFalse(json.loads(settings.read_text(encoding='utf-8'))['plugins']['codex-usage']['enabled'])
+            self.assertFalse(pending.exists())
 
 
 if __name__ == '__main__': unittest.main()

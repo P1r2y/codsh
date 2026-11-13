@@ -65,7 +65,7 @@ class UsageAccumulator {
     const p = event.payload ?? {}, stamp = time(event.timestamp);
     const order=++this.order;
     if (event.type === 'session_meta') {
-      this.meta = {id:p.id, originator:p.originator, source:p.source}; return;
+      this.meta = {id:p.id, originator:p.originator, source:p.source, cwd:p.cwd}; return;
     }
     if (event.type === 'turn_context') {
       this.model = modelName(p.model) ?? this.model;
@@ -165,6 +165,43 @@ class UsageAccumulator {
       requests:turns.reduce((n,t)=>n+t.requests,0), cacheHitPercent:total.input_tokens > 0 ? clamp(100*total.cached_input_tokens/total.input_tokens) : null,
       contextPercent:this.contextWindow > 0 && this.lastUsage ? clamp(100*this.lastUsage.total_tokens/this.contextWindow) : null,
       contextWindow:this.contextWindow, lastUsage:this.lastUsage, turns, limits:this.limits};
+  }
+  toCache() {
+    return {
+      total:this.total, hasTotal:this.hasTotal, currentId:this.currentId, lastUsage:this.lastUsage,
+      contextWindow:this.contextWindow, limits:this.limits, model:this.model, order:this.order,
+      ids:[...this.ids], turnModels:[...this.turnModels],
+      turns:[...this.turns.values()].map(turn => ({...turn, recordIds:[...turn.recordIds], itemIds:[...turn.itemIds]}))
+    };
+  }
+  static fromCache(value) {
+    try {
+      if (!value || !usage(value.total) || typeof value.hasTotal !== 'boolean' ||
+          !Number.isSafeInteger(value.order) || value.order < 0 ||
+          !Array.isArray(value.ids) || !value.ids.every(id => typeof id === 'string') ||
+          !Array.isArray(value.turnModels) || !value.turnModels.every(pair => Array.isArray(pair) && pair.length === 2 &&
+            typeof pair[0] === 'string' && (pair[1] === null || typeof pair[1] === 'string')) ||
+          !Array.isArray(value.turns) || (value.model != null && typeof value.model !== 'string') ||
+          (value.lastUsage != null && !usage(value.lastUsage))) return null;
+      const acc = new UsageAccumulator();
+      Object.assign(acc, {total:usage(value.total), hasTotal:value.hasTotal, currentId:value.currentId ?? null,
+        lastUsage:value.lastUsage == null ? null : usage(value.lastUsage), contextWindow:value.contextWindow ?? null,
+        limits:value.limits ?? null, model:value.model ?? null, order:value.order});
+      acc.ids = new Set(value.ids);
+      acc.turnModels = new Map(value.turnModels);
+      for (const turn of value.turns) {
+        if (!turn || typeof turn.id !== 'string' || !usage(turn.usage) ||
+            !Array.isArray(turn.recordIds) || !Array.isArray(turn.itemIds) ||
+            !turn.recordIds.every(id => typeof id === 'string') || !turn.itemIds.every(id => typeof id === 'string') ||
+            !Array.isArray(turn.responses) || !Array.isArray(turn.legacyResponses) || !Array.isArray(turn.modelItems) ||
+            !turn.modelItems.every(item => item && Number.isFinite(item.order)) ||
+            ![...turn.responses, ...turn.legacyResponses].every(record => record && Number.isFinite(record.order) &&
+              usage(record.usage) && (record.countedUsage == null || usage(record.countedUsage)) &&
+              (record.model == null || typeof record.model === 'string'))) return null;
+        acc.turns.set(turn.id, {...turn, usage:usage(turn.usage), recordIds:new Set(turn.recordIds), itemIds:new Set(turn.itemIds)});
+      }
+      return acc;
+    } catch { return null; }
   }
 }
 module.exports = {UsageAccumulator, normalizeLimits, unionDuration};

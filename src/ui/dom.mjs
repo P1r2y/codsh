@@ -138,7 +138,11 @@ export class CodexDOM {
       if (record.type === 'attributes') {
         return !['hidden','aria-hidden','inert'].includes(record.attributeName) || structural(target);
       }
-      return [...record.addedNodes, ...record.removedNodes].some(structural);
+      const nodes=[...record.addedNodes,...record.removedNodes];
+      if(nodes.some(structural))return true;
+      // Reconcile native siblings of the strip without depending on periodic scans.
+      return target?.matches('[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]')&&
+        nodes.some(node=>node.nodeType===1&&!node.matches(OWN));
     });
   }
   dispose() {

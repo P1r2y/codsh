@@ -1,4 +1,4 @@
-// codsh-source-sha256:00c9ad5868b889c603c014ad3fe1be40b23e85b5e4f630c707b5b4a4508880de
+// codsh-source-sha256:f69e728972ee2355b2d248fb4da3dd276be10cd5714b8f513de8ee6ad4028a01
 "use strict";
 (() => {
   var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -21,11 +21,12 @@
     "src/protocol.cjs"(exports, module) {
       "use strict";
       var READ_CHANNEL = "codex-usage-ui:read-v1";
+      var CHANGE_CHANNEL = "codex-usage-ui:changed-v1";
       var STATE_CHANNEL = "codex-enhancement-loader:state-v1";
       var NATIVE_FROM_VIEW = "codex_desktop:message-for-view";
       var UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
       var normalizeThreadId = (value) => typeof value === "string" && UUID.test(value) ? value.toLowerCase() : null;
-      module.exports = { READ_CHANNEL, STATE_CHANNEL, NATIVE_FROM_VIEW, UUID, normalizeThreadId };
+      module.exports = { READ_CHANNEL, CHANGE_CHANNEL, STATE_CHANNEL, NATIVE_FROM_VIEW, UUID, normalizeThreadId };
     }
   });
 

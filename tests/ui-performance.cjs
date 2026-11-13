@@ -23,7 +23,12 @@ async function performancePresentation(win) {
       await new Promise(resolve=>setTimeout(resolve,230));
       document.dispatchEvent(new Event('codsh-performance-read'));
       const {scans,layouts}=JSON.parse(document.documentElement.dataset.fixturePerformance);
-      return {scans,layouts,elapsed:performance.now()-start,checks:{streamingScans:scans<=2,streamingLayouts:layouts<400}};
+      document.dispatchEvent(new Event('codsh-performance-start'));
+      await new Promise(resolve=>setTimeout(resolve,4000));
+      document.dispatchEvent(new Event('codsh-performance-read'));
+      const live=JSON.parse(document.documentElement.dataset.fixturePerformance);
+      return {scans,layouts,live,elapsed:performance.now()-start,checks:{streamingScans:scans<=2,streamingLayouts:layouts<400,
+        liveScans:live.scans<=3,liveLayouts:live.layouts<150}};
     }finally{
       document.dispatchEvent(new Event('codsh-performance-read'));
     }

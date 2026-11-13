@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('node:fs');
 const path=require('node:path');
-const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW}=require('../src/protocol.cjs');
+const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW,CHANGE_CHANNEL}=require('../src/protocol.cjs');
 const {quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation,footerInsetPresentation}=require('./ui-presentation.cjs');
 const {performancePresentation}=require('./ui-performance.cjs');
 const {quotaGeometryPresentation}=require('./quota-geometry.cjs');
@@ -31,7 +31,19 @@ async function selfTest() {
   const write = data => fs.writeFileSync(output,JSON.stringify(data,null,2));
   try {
     await app.whenReady();
+    const {ProjectCache}=require('../src/project-cache.cjs');
+    const backgroundCache=new ProjectCache(app.getPath('temp'));
+    const workerState=await backgroundCache.request('stats');
+    await backgroundCache.dispose();
     const fixture = JSON.parse(fs.readFileSync(path.join(__dirname,'fixture.json'),'utf8'));
+    // Synthetic speed samples use explicit durations rather than the wall clock.
+    fixture.snapshot.turns.forEach(turn=>{turn.startedAt=null;});
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance') {
+      fixture.snapshot.revision='performance-v1';
+      fixture.snapshot.turns.at(-1).completed=false;
+      fixture.snapshot.turns.at(-1).averageTps=62.5;
+      fixture.snapshot.turns.at(-1).startedAt=Date.now()-10000;
+    }
     const snapshots=new Map([[fixture.snapshot.threadId,fixture.snapshot]]),responseDelays=new Map();
     let pluginEnabled=true;
     let pluginCode=fs.readFileSync(path.join(__dirname,'../dist/usage-preload.cjs'),'utf8');
@@ -44,16 +56,32 @@ async function selfTest() {
       document.addEventListener('codsh-performance-read',()=>{active=false;document.documentElement.dataset.fixturePerformance=JSON.stringify({scans,layouts});});
     })();\n`+pluginCode;
     ipcMain.handle('codex-enhancement-loader:state-v1',()=>({enabled:pluginEnabled,key:'fixture',code:pluginCode}));
+    let conversationReads=0;
     ipcMain.handle(CHANNEL,async(_event,request)=>{
       const id=request?.threadId,delay=responseDelays.get(id)??0;
+      if(id)conversationReads++;
       if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
-      return snapshots.get(id)??{threadId:id,available:false,limits:fixture.snapshot.limits};
+      if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance' && id && request.knownRevision==='performance-v1') {
+        const turn=fixture.snapshot.turns.at(-1);
+        return {threadId:id,revision:'performance-v1',unchanged:true,eventDriven:true,liveTick:{id:turn.id,durationMs:Date.now()%100000,averageTps:(Date.now()%100000)/1000}};
+      }
+      return {...(snapshots.get(id)??{threadId:id,available:false,limits:fixture.snapshot.limits}),eventDriven:Boolean(id)};
     });
     const win = new BrowserWindow({width:1200,height:820,show:false,webPreferences:{preload:path.join(__dirname,'../dist/enhancement-preload.cjs'),contextIsolation:true,sandbox:true,backgroundThrottling:false,offscreen:true}});
+    // Simulate the host's log-change notifications, without polling in the renderer.
+    let published=JSON.stringify([...snapshots]);
+    const publishing=setInterval(()=>{
+      const next=JSON.stringify([...snapshots]);
+      if(next===published)return;published=next;
+      for(const id of snapshots.keys())win.webContents.send(CHANGE_CHANNEL,{threadId:id,watching:true});
+    },100);publishing.unref();
     await win.loadFile(path.join(__dirname,'fixture.html'));
     await new Promise(resolve=>setTimeout(resolve,2200));
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance') {
+      const before=conversationReads;
       const performance=await performancePresentation(win);
+      performance.readsWithoutLogChanges=conversationReads-before;
+      performance.checks.idleQueries=performance.readsWithoutLogChanges===0;
       write({ok:Object.values(performance.checks).every(Boolean),...performance});win.destroy();app.exit(0);return;
     }
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='layout') {
@@ -155,6 +183,14 @@ async function selfTest() {
     const enabledState=await win.webContents.executeJavaScript(`({ring:!!document.querySelector('.cu-ring'),footers:document.querySelectorAll('.cu-turn').length})`);
     const modes=await modePresentation(win);
     const footerInset=await footerInsetPresentation(win);
+    await win.webContents.executeJavaScriptInIsolatedWorld(999,[{code:"Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});document.dispatchEvent(new Event('visibilitychange'));"}]);
+    const hiddenReads=conversationReads;
+    win.webContents.send(CHANGE_CHANNEL,{threadId:fixture.snapshot.threadId,watching:true});
+    await delay(2200);
+    const hiddenPaused=conversationReads===hiddenReads;
+    await win.webContents.executeJavaScriptInIsolatedWorld(999,[{code:"Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});document.dispatchEvent(new Event('visibilitychange'));"}]);
+    await delay(250);
+    const resumed=conversationReads>hiddenReads;
     const secondId='00000000-0000-4000-8000-000000000002',second=structuredClone(fixture.snapshot);
     second.threadId=secondId;
     const doubleUsage=u=>Object.fromEntries(Object.entries(u).map(([key,value])=>[key,value*2]));
@@ -239,6 +275,8 @@ async function selfTest() {
     fs.writeFileSync(output+'.quota-reset.png',(await win.webContents.capturePage()).toPNG());
     const quotaGeometry=await quotaGeometryPresentation(win);
     const checks={
+      backgroundCache:workerState.projects===0,
+      hiddenPause:hiddenPaused&&resumed,
       ...quotaGeometry.checks,
       ...quotaBehavior.checks,...nativeQuotaBehavior.checks,...numberBehavior.checks,...modes.checks,...footerInset.checks,
       metricChanges:metricChanges.animations>0&&metricChanges.labelOpacity===1&&metricChanges.tweens>0&&metricChanges.moved&&metricChanges.added,
@@ -282,7 +320,7 @@ async function selfTest() {
       expiredQuotaUnknown:expiredQuota.label.includes('待更新')&&expiredQuota.text.includes('剩余 —')&&!expiredQuota.text.includes('58%'),
       quotaResetAgain:refreshedQuota.label.includes('剩余 100%')&&refreshedQuota.text.includes('剩余 100%')&&refreshedQuota.errors.length===0
     });
-    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,quotaGeometry,quotaBehavior,nativeQuotaBehavior,numberBehavior,modes,footerInset,metricChanges,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,quotaPanelState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
+    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,visibility:{hiddenPaused,resumed},quotaGeometry,quotaBehavior,nativeQuotaBehavior,numberBehavior,modes,footerInset,metricChanges,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,quotaPanelState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
     win.destroy(); app.exit(0);
   } catch (e) { write({ok:false,error:String(e),stack:e.stack}); app.exit(1); }
 }

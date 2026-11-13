@@ -1,4 +1,4 @@
-// codsh-source-sha256:00c9ad5868b889c603c014ad3fe1be40b23e85b5e4f630c707b5b4a4508880de
+// codsh-source-sha256:f69e728972ee2355b2d248fb4da3dd276be10cd5714b8f513de8ee6ad4028a01
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -41,11 +41,12 @@
     "src/protocol.cjs"(exports, module) {
       "use strict";
       var READ_CHANNEL = "codex-usage-ui:read-v1";
+      var CHANGE_CHANNEL = "codex-usage-ui:changed-v1";
       var STATE_CHANNEL = "codex-enhancement-loader:state-v1";
       var NATIVE_FROM_VIEW = "codex_desktop:message-for-view";
       var UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
       var normalizeThreadId2 = (value) => typeof value === "string" && UUID.test(value) ? value.toLowerCase() : null;
-      module.exports = { READ_CHANNEL, STATE_CHANNEL, NATIVE_FROM_VIEW, UUID, normalizeThreadId: normalizeThreadId2 };
+      module.exports = { READ_CHANNEL, CHANGE_CHANNEL, STATE_CHANNEL, NATIVE_FROM_VIEW, UUID, normalizeThreadId: normalizeThreadId2 };
     }
   });
 
@@ -202,13 +203,26 @@
       }
       const id = this.threadId;
       const revision = this.revision;
-      const task = Promise.resolve().then(() => this.read(id));
+      const knownRevision = this.snapshot?.revision;
+      const task = Promise.resolve().then(() => this.read(id, knownRevision));
       this.inflight = task;
       try {
         const next = await task;
         if (!this.disposed && revision === this.revision && next?.threadId === id) {
-          this.snapshot = next;
-          this.onChange(false);
+          if (this.snapshot && typeof next.eventDriven === "boolean") this.snapshot.eventDriven = next.eventDriven;
+          if (next.unchanged && next.liveTick && this.snapshot) {
+            const turn = this.snapshot.turns?.find((item) => item.id === next.liveTick.id);
+            if (turn && !turn.completed) {
+              turn.durationMs = next.liveTick.durationMs;
+              turn.averageTps = next.liveTick.averageTps;
+              this.onChange(false, true);
+            }
+          } else if (!next.unchanged) {
+            const sameRevision = next.revision && next.revision === this.snapshot?.revision;
+            const live = next.turns?.some((turn) => !turn.completed);
+            this.snapshot = next;
+            if (!sameRevision || live) this.onChange(false);
+          }
         }
       } catch (error) {
         if (!this.disposed) console.warn("[CodexUsageUI]", String(error));
@@ -270,18 +284,21 @@
       }
       const limits = normalizeLimits(raw, this.now());
       if (!limits) return;
+      const changed = JSON.stringify(this.native?.groups) !== JSON.stringify(limits.groups);
       this.native = limits;
-      this.onChange();
+      if (changed) this.onChange();
     }
     async refresh(force = false) {
+      if (this.native?.groups.some((group) => group.windows.some((w) => w.resetsAt == null || w.resetsAt > this.now()))) return;
       if (this.disposed || this.inflight || !force && this.now() - this.lastPoll < 3e4) return;
       this.lastPoll = this.now();
       this.inflight = true;
       try {
-        const snapshot = await this.ipc.invoke(import_protocol2.default.READ_CHANNEL, { threadId: null });
+        const snapshot = await this.ipc.invoke(import_protocol2.default.READ_CHANNEL, { threadId: null, quotaOnly: true });
         if (this.disposed) return;
+        const before = JSON.stringify(this.limits?.groups);
         this.useFallback(snapshot?.limits);
-        this.onChange();
+        if (before !== JSON.stringify(this.limits?.groups)) this.onChange();
       } catch (error) {
         if (!this.disposed) console.warn("[CodexUsageUI]", String(error));
       } finally {
@@ -416,7 +433,9 @@
         if (record.type === "attributes") {
           return !["hidden", "aria-hidden", "inert"].includes(record.attributeName) || structural(target);
         }
-        return [...record.addedNodes, ...record.removedNodes].some(structural);
+        const nodes = [...record.addedNodes, ...record.removedNodes];
+        if (nodes.some(structural)) return true;
+        return target?.matches("[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]") && nodes.some((node) => node.nodeType === 1 && !node.matches(OWN));
       });
     }
     dispose() {
@@ -1151,17 +1170,26 @@
       this.dom = new CodexDOM();
       this.replies = /* @__PURE__ */ new Map();
       this.renderTimer = null;
+      this.lastSync = 0;
       this.details = createDetailsPopover(() => this.quota.hide());
       this.quota = createQuotaWidget(() => {
         this.details.close();
         void this.quotaState.refresh(true);
       });
-      this.quotaState = new QuotaController(ipc, () => this.render());
+      this.quotaState = new QuotaController(ipc, () => this.renderQuota());
+      const changed = (_event, message) => {
+        if (message?.threadId !== this.controller.threadId) return;
+        if (this.controller.snapshot) this.controller.snapshot.eventDriven = message.watching !== false;
+        if (document.visibilityState !== "hidden") void this.controller.refresh();
+      };
+      ipc.on(import_protocol4.default.CHANGE_CHANNEL, changed);
+      this.life.own(() => ipc.removeListener(import_protocol4.default.CHANGE_CHANNEL, changed));
       this.controller = new ConversationController(
-        (id) => ipc.invoke(import_protocol4.default.READ_CHANNEL, { threadId: id }),
-        (changed) => {
-          if (changed) this.details.close();
-          this.render();
+        (id, knownRevision) => ipc.invoke(import_protocol4.default.READ_CHANNEL, { threadId: id, knownRevision }),
+        (changed2, liveOnly) => {
+          if (changed2) this.details.close();
+          if (liveOnly) this.renderLive();
+          else this.render();
         }
       );
       const strip = element("div", "cu-strip");
@@ -1177,9 +1205,39 @@
     }
     synchronize() {
       if (this.life.disposed) return;
+      this.lastSync = Date.now();
       this.controller.select(this.dom.thread());
+      if (document.visibilityState === "hidden") return;
       void this.controller.refresh();
       void this.quotaState.refresh();
+    }
+    renderStrip(snapshot, id) {
+      if (!snapshot?.available) {
+        this.details.remove(this.strip.node);
+        this.strip.message(id ? "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u7B49\u5F85\u672C\u5730\u4F1A\u8BDD\u6570\u636E" : "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u5F00\u59CB\u5BF9\u8BDD\u540E\u663E\u793A");
+        return;
+      }
+      const items = [
+        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? []))}` },
+        { key: "tokens", icon: "token", kind: "tokens", text: `${fmt(snapshot.total.total_tokens)} tok \xB7 \u7F13\u5B58\u547D\u4E2D ${pct(snapshot.cacheHitPercent)}` },
+        { key: "context", icon: "context", kind: "context", text: pct(snapshot.contextPercent) }
+      ];
+      const last = snapshot.turns?.at(-1);
+      if (last && !last.completed) items.push({ key: "live", icon: "speed", kind: "live", text: `\u5F53\u524D ${last.averageTps?.toFixed(1) ?? "\u2014"} tok/s`, live: true });
+      this.strip.render(items);
+    }
+    renderLive() {
+      const snapshot = this.controller.snapshot;
+      if (!snapshot || !this.strip.node.isConnected) return;
+      this.renderStrip(snapshot, this.controller.threadId);
+      this.details.update(snapshot);
+    }
+    renderQuota() {
+      if (this.life.disposed || document.visibilityState === "hidden") return;
+      const mount = this.quotaMount;
+      if (!mount?.parent?.isConnected || mount.before && mount.before.parentNode !== mount.parent) this.quotaMount = this.dom.quotaMount();
+      this.lastQuotaPaint = Date.now();
+      this.quota.render({ limits: this.quotaState.limits }, this.quotaMount);
     }
     render() {
       if (this.life.disposed || !document.body) return;
@@ -1193,19 +1251,7 @@
         this.dom.alignComposer(view.composer);
         this.strip.mount(view.composer);
         this.strip.node.dataset.cuThread = view.id ?? "";
-        if (!snapshot?.available) {
-          this.details.remove(this.strip.node);
-          this.strip.message(view.id ? "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u7B49\u5F85\u672C\u5730\u4F1A\u8BDD\u6570\u636E" : "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u5F00\u59CB\u5BF9\u8BDD\u540E\u663E\u793A");
-        } else {
-          const items = [
-            { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? []))}` },
-            { key: "tokens", icon: "token", kind: "tokens", text: `${fmt(snapshot.total.total_tokens)} tok \xB7 \u7F13\u5B58\u547D\u4E2D ${pct(snapshot.cacheHitPercent)}` },
-            { key: "context", icon: "context", kind: "context", text: pct(snapshot.contextPercent) }
-          ];
-          const last = snapshot.turns?.at(-1);
-          if (last && !last.completed) items.push({ key: "live", icon: "speed", kind: "live", text: `\u5F53\u524D ${last.averageTps?.toFixed(1) ?? "\u2014"} tok/s`, live: true });
-          this.strip.render(items);
-        }
+        this.renderStrip(snapshot, view.id);
       } else this.strip.unmount();
       for (const [id, group] of this.replies) if (!view.replies.has(id)) {
         group.dispose();
@@ -1232,7 +1278,8 @@
         ]);
       }
       this.quotaState.useFallback(snapshot?.limits);
-      this.quota.render({ limits: this.quotaState.limits }, view.quota);
+      this.quotaMount = view.quota;
+      this.renderQuota();
       this.details.update(snapshot);
       this.dom.reconcile();
     }
@@ -1256,7 +1303,10 @@
         this.renderTimer = setTimeout(() => {
           this.renderTimer = null;
           if (this.dom.thread() !== this.controller.threadId) this.synchronize();
-          else this.render();
+          else {
+            this.render();
+            if (!this.controller.snapshot?.eventDriven && Date.now() - this.lastSync >= 1800) this.synchronize();
+          }
         }, urgent ? 0 : 80);
       });
       observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: [
@@ -1270,8 +1320,9 @@
       ] });
       this.life.own(() => observer.disconnect());
       this.life.listen(window, "resize", () => this.align());
-      this.life.listen(window, "focus", () => {
-        void this.quotaState.refresh(true);
+      this.life.listen(window, "focus", () => this.synchronize());
+      this.life.listen(document, "visibilitychange", () => {
+        if (document.visibilityState !== "hidden") this.synchronize();
       });
       this.life.listen(window, "popstate", () => this.synchronize());
       this.life.listen(window, "hashchange", () => this.synchronize());
@@ -1284,7 +1335,23 @@
         this.quota.keydown(event);
       }, { capture: true });
       this.life.listen(document, "scroll", () => this.details.position(), { capture: true });
-      this.life.interval(() => this.synchronize(), 1800);
+      this.life.interval(() => {
+        if (document.visibilityState === "hidden") return;
+        const turns = this.controller.snapshot?.turns ?? [];
+        const live = Boolean(turns.at(-1) && !turns.at(-1).completed);
+        const snapshot = this.controller.snapshot;
+        const interval = snapshot?.eventDriven ? 6e4 : !snapshot?.available || live ? 1800 : 3e4;
+        if (Date.now() - this.lastSync >= interval) this.synchronize();
+        else if (live && snapshot?.eventDriven) {
+          const turn = turns.at(-1), duration = turn.startedAt == null ? null : Math.max(0, Date.now() - turn.startedAt);
+          if (duration != null) {
+            turn.durationMs = duration;
+            turn.averageTps = duration > 0 ? turn.usage.output_tokens * 1e3 / duration : null;
+            this.renderLive();
+          }
+        }
+        if (Date.now() - (this.lastQuotaPaint ?? 0) >= 6e4) this.renderQuota();
+      }, 1800);
       this.life.listen(window, "beforeunload", () => this.dispose(), { once: true });
       document.fonts?.ready.then(() => {
         if (!this.life.disposed) this.align();

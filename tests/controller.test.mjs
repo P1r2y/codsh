@@ -76,3 +76,27 @@ test('合并刷新遇到读取失败时统一处理错误，并执行后续读�
   assert.equal(controller.snapshot.threadId, first);
   controller.dispose();
 });
+
+test('未变化的历史数据不触发重绘，运行中只更新计时', async () => {
+  const requests = [], changes = [];
+  const responses = [
+    {threadId:first, revision:'v1', turns:[{id:'turn', completed:true}]},
+    {threadId:first, revision:'v1', unchanged:true},
+    {threadId:first, revision:'v2', turns:[{id:'turn', completed:false, durationMs:1000, averageTps:10}]},
+    {threadId:first, revision:'v2', unchanged:true, liveTick:{id:'turn', durationMs:2000, averageTps:5}}
+  ];
+  const controller = new ConversationController((id, knownRevision) => {
+    requests.push({id, knownRevision}); return responses.shift();
+  }, (changed, liveOnly) => changes.push({changed, liveOnly}));
+  controller.select(first);
+  await controller.refresh();
+  await controller.refresh();
+  assert.equal(changes.length, 2);
+  assert.equal(requests[1].knownRevision, 'v1');
+  await controller.refresh();
+  await controller.refresh();
+  assert.deepEqual(changes.at(-1), {changed:false, liveOnly:true});
+  assert.equal(controller.snapshot.turns[0].durationMs, 2000);
+  assert.equal(controller.snapshot.turns[0].averageTps, 5);
+  controller.dispose();
+});

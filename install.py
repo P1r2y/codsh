@@ -318,7 +318,7 @@ def prepare_runtime(source, destination, original_hash):
 
 def install_plugin(source, destination):
     plugin = destination/'plugins/codex-usage'
-    for file in ['usage-model.cjs', 'quota-model.cjs', 'usage-data.cjs', 'rollout-store.cjs', 'protocol.cjs', 'usage-host.cjs']:
+    for file in ['usage-model.cjs', 'quota-model.cjs', 'usage-data.cjs', 'project-cache.cjs', 'project-cache-worker.cjs', 'log-watch.cjs', 'rollout-store.cjs', 'protocol.cjs', 'usage-host.cjs']:
         write_atomic(plugin/'lib'/file, (ROOT/'src'/file).read_bytes())
     # 提交完整前端后再更新清单，加载器按摘要切换版本。
     write_atomic(plugin/'ui/usage-preload.cjs', (ROOT/'dist/usage-preload.cjs').read_bytes())
@@ -342,6 +342,11 @@ $runtime=[IO.Path]::GetFullPath((Join-Path $record.runtime 'ChatGPT.exe'))
 if(-not $runtime.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)){throw '运行时路径无效'}
 $existing=Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.ExecutablePath -match 'Codex|CodexUsageUI' }
 if($existing){Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('请先从托盘完全退出 Codex，再重新打开。','Codex') | Out-Null; exit}
+$pending=Join-Path $PSScriptRoot 'enable-on-next-start.flag'
+if(Test-Path -LiteralPath $pending){
+  & (Join-Path $PSScriptRoot 'Set-UsagePlugin.ps1') -Mode Enable
+  Remove-Item -LiteralPath $pending -Force
+}
 Start-Process -FilePath $runtime -WorkingDirectory (Split-Path $runtime) -WindowStyle Hidden
 ''',
         'Start-OriginalCodex.ps1': r'''$ErrorActionPreference='Stop'
@@ -358,6 +363,10 @@ $settings.plugins.'codex-usage'.enabled=($Mode -eq 'Enable')
 $temporary=$file+'.tmp'
 [IO.File]::WriteAllText($temporary,($settings | ConvertTo-Json -Depth 8),([Text.UTF8Encoding]::new($false)))
 Move-Item -LiteralPath $temporary -Destination $file -Force
+if($Mode -eq 'Disable'){
+  $pending=Join-Path $PSScriptRoot 'enable-on-next-start.flag'
+  if(Test-Path -LiteralPath $pending){Remove-Item -LiteralPath $pending -Force}
+}
 ''',
         'Uninstall-UsagePlugin.ps1': r'''$ErrorActionPreference='Stop'
 & (Join-Path $PSScriptRoot 'Set-UsagePlugin.ps1') -Mode Disable

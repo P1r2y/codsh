@@ -40,18 +40,22 @@ export class QuotaController {
     const limits = normalizeLimits(raw, this.now());
     if (!limits) return;
     // 原生账户快照优先，重置后的零用量不能被旧会话记录覆盖。
+    const changed=JSON.stringify(this.native?.groups)!==JSON.stringify(limits.groups);
     this.native = limits;
-    this.onChange();
+    if(changed)this.onChange();
   }
   async refresh(force = false) {
+    // Native account notifications are authoritative; do not scan logs behind them.
+    if(this.native?.groups.some(group=>group.windows.some(w=>w.resetsAt==null||w.resetsAt>this.now())))return;
     if (this.disposed || this.inflight || !force && this.now()-this.lastPoll < 30000) return;
     this.lastPoll = this.now();
     this.inflight = true;
     try {
-      const snapshot = await this.ipc.invoke(protocol.READ_CHANNEL, {threadId:null});
+      const snapshot = await this.ipc.invoke(protocol.READ_CHANNEL, {threadId:null,quotaOnly:true});
       if (this.disposed) return;
+      const before=JSON.stringify(this.limits?.groups);
       this.useFallback(snapshot?.limits);
-      this.onChange();
+      if(before!==JSON.stringify(this.limits?.groups))this.onChange();
     } catch (error) {
       if (!this.disposed) console.warn('[CodexUsageUI]', String(error));
     } finally { this.inflight = false; }

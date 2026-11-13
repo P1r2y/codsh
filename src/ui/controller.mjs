@@ -29,13 +29,26 @@ export class ConversationController {
     }
     const id = this.threadId;
     const revision = this.revision;
-    const task = Promise.resolve().then(() => this.read(id));
+    const knownRevision = this.snapshot?.revision;
+    const task = Promise.resolve().then(() => this.read(id, knownRevision));
     this.inflight = task;
     try {
       const next = await task;
       if (!this.disposed && revision === this.revision && next?.threadId === id) {
-        this.snapshot = next;
-        this.onChange(false);
+        if(this.snapshot&&typeof next.eventDriven==='boolean')this.snapshot.eventDriven=next.eventDriven;
+        if (next.unchanged && next.liveTick && this.snapshot) {
+          const turn = this.snapshot.turns?.find(item => item.id === next.liveTick.id);
+          if (turn && !turn.completed) {
+            turn.durationMs = next.liveTick.durationMs;
+            turn.averageTps = next.liveTick.averageTps;
+            this.onChange(false, true);
+          }
+        } else if (!next.unchanged) {
+          const sameRevision = next.revision && next.revision === this.snapshot?.revision;
+          const live = next.turns?.some(turn => !turn.completed);
+          this.snapshot = next;
+          if (!sameRevision || live) this.onChange(false);
+        }
       }
     } catch (error) {
       if (!this.disposed) console.warn('[CodexUsageUI]', String(error));

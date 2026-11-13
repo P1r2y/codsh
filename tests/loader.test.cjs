@@ -7,7 +7,8 @@ for(const versioned of [false,true]) test(`加载器：${versioned?'版本运行
  const plugin=path.join(base,'plugins/codex-usage');fs.mkdirSync(path.join(plugin,'ui'),{recursive:true});
  fs.writeFileSync(path.join(plugin,'plugin.json'),JSON.stringify({host:'lib/usage-host.cjs',preload:'ui/usage-preload.cjs'}));
  const config=path.join(base,'plugins.json'),ui=path.join(plugin,'ui/usage-preload.cjs');
- fs.writeFileSync(config,'\uFEFF'+JSON.stringify({plugins:{'codex-usage':{enabled:true}}}));fs.writeFileSync(ui,'window.first=true');
+ fs.writeFileSync(config,'\uFEFF'+JSON.stringify({plugins:{'codex-usage':{enabled:false},other:{enabled:true}}}));fs.writeFileSync(ui,'window.first=true');
+ fs.writeFileSync(path.join(base,'enable-on-next-start.flag'),'');
  const resourcesPath=path.join(base,versioned?'runtimes/client-id/app/resources':'app/resources');
  if(versioned){fs.mkdirSync(resourcesPath,{recursive:true});fs.writeFileSync(path.join(resourcesPath,'codsh-loader.json'),JSON.stringify({base:path.relative(resourcesPath,base)}));}
  const handlers=new Map();let hostOptions;
@@ -19,6 +20,8 @@ for(const versioned of [false,true]) test(`加载器：${versioned?'版本运行
  }};
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/enhancement-loader.cjs'),'utf8'),context);
  context.module.exports.register();
+ assert.equal(fs.existsSync(path.join(base,'enable-on-next-start.flag')),false);
+ assert.equal(JSON.parse(fs.readFileSync(config,'utf8')).plugins.other.enabled,true);
  const read=handlers.get('codex-enhancement-loader:state-v1'),event={senderFrame:{url:'app://-/index.html'}};
  assert.equal(hostOptions.isEnabled(),true);const one=read(event);assert.equal(one.code,'window.first=true');
  assert.equal(read(event,{key:one.key}).code,undefined);

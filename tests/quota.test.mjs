@@ -38,7 +38,7 @@ test('全局额度独立刷新，合并并发读取并限制轮询频率', async
   const first = controller.refresh();
   await controller.refresh(); await controller.refresh(true);
   assert.equal(requests.length, 1);
-  assert.deepEqual(requests[0], {channel:protocol.READ_CHANNEL,request:{threadId:null}});
+  assert.deepEqual(requests[0], {channel:protocol.READ_CHANNEL,request:{threadId:null,quotaOnly:true}});
   resolve({limits:normalized(92)}); await first;
   assert.equal(remaining(controller), 8);
   await controller.refresh(); assert.equal(requests.length, 1);
@@ -61,14 +61,25 @@ test('账户变化清除旧额度，忽略远程主机、错误响应和销毁�
   assert.equal(remaining(controller), 8);
   ipc.emit(protocol.NATIVE_FROM_VIEW, {}, {type:'mcp-notification',hostId:'local',method:'account/updated'});
   controller.useFallback(normalized(92)); assert.equal(controller.limits, null);
+  const pending = controller.refresh();
   ipc.emit(protocol.NATIVE_FROM_VIEW, {}, notification(raw(0)));
   assert.equal(remaining(controller), 100);
-  const pending = controller.refresh();
   assert.equal(ipc.listenerCount(protocol.NATIVE_FROM_VIEW), 1);
   controller.dispose(); controller.dispose();
   resolve({limits:normalized(99)}); await pending;
   assert.equal(ipc.listenerCount(protocol.NATIVE_FROM_VIEW), 0);
   assert.equal(changed, 2); assert.equal(controller.limits, null);
+});
+
+test('原生额度有效时不再读取备用日志，相同额度通知不重绘', async () => {
+  const ipc=new EventEmitter();let requests=0,changed=0;
+  ipc.invoke=async()=>{requests++;return {limits:normalized(90)};};
+  const controller=new QuotaController(ipc,()=>changed++,()=>now);
+  ipc.emit(protocol.NATIVE_FROM_VIEW,{},notification(raw(5)));
+  ipc.emit(protocol.NATIVE_FROM_VIEW,{},notification(raw(5)));
+  await controller.refresh();await controller.refresh(true);
+  assert.equal(requests,0);assert.equal(changed,1);assert.equal(remaining(controller),95);
+  controller.dispose();
 });
 
 test('过期的低额度窗口不遮盖仍有效的额度窗口', () => {

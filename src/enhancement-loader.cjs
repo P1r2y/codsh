@@ -14,6 +14,17 @@ function register(){
     : path.resolve(process.resourcesPath,'..','..');
   const plugin=path.join(base,'plugins','codex-usage');
   const configuration=path.join(base,'plugins.json');
+  // All entry points consume this one-shot request, including taskbar launches.
+  const pending=path.join(base,'enable-on-next-start.flag');
+  if(fs.existsSync(pending)){
+    try{
+      const settings=readJson(configuration);
+      settings.plugins??={};settings.plugins['codex-usage']??={};settings.plugins['codex-usage'].enabled=true;
+      const temporary=configuration+'.startup.tmp';
+      fs.writeFileSync(temporary,JSON.stringify(settings,null,2));fs.renameSync(temporary,configuration);
+      fs.unlinkSync(pending);
+    }catch{/* Preserve the request if this installation is not writable. */}
+  }
   function isEnabled(){
     try{return readJson(configuration).plugins?.['codex-usage']?.enabled===true;}
     catch{return false;}
