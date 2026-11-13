@@ -40,7 +40,7 @@ async function quotaPresentation(win) {
       diamondY:d?matrix.d*(d.y+d.height/2)+matrix.f-(b.y+b.height/2):null,
       nativeHidden:native?.getClientRects().length===0,nativePosition:ring.nextElementSibling===native,
       radius:[...ring.querySelectorAll('.cu-track')].map(node=>Number(node.getAttribute('r'))),
-      stroke:getComputedStyle(ring.querySelector('.cu-remaining')).strokeWidth};
+      stroke:parseFloat(getComputedStyle(ring.querySelector('.cu-remaining')).strokeWidth)*s.width/svg.viewBox.baseVal.width};
   })()`);
   const fade = await win.webContents.executeJavaScript(`(() => {
     document.querySelector('.cu-ring button').click();
@@ -75,7 +75,7 @@ async function quotaPresentation(win) {
   const reopened = await win.webContents.executeJavaScript(`!document.querySelector('.cu-quota-panel').hidden&&document.querySelector('.cu-quota-panel').dataset.state==='open'`);
   return {before,fade,opened,persists,toggled,escaped,outside,reopened,checks:{
     quotaCenter:before.centerText===0&&before.circles===4&&Math.abs(before.offsetX)<.1&&Math.abs(before.offsetY)<.1,
-    quotaDiamond:before.diamond&&Math.abs(before.diamondX)<.1&&Math.abs(before.diamondY)<.1&&before.radius.join(',')==='14,10'&&before.stroke==='1.75px',
+    quotaDiamond:before.diamond&&Math.abs(before.diamondX)<.1&&Math.abs(before.diamondY)<.1&&before.radius.join(',')==='14,10'&&Math.abs(before.stroke-1.75)<.001,
     nativeQuotaHidden:before.nativeHidden&&before.nativePosition,
     quotaClickOnly:before.hidden&&before.expanded==='false'&&opened.visible&&opened.role==='dialog'&&opened.expanded==='true'&&persists,
     quotaFade:fade.animations>0&&fade.opacity>0&&fade.opacity<1&&fade.transform==='none'&&fade.property==='opacity'&&Math.abs(fade.offsetX)<.1&&Math.abs(fade.offsetY)<.1,

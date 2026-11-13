@@ -87,9 +87,10 @@ export function createQuotaWidget(onOpen) {
     const outer=ring.querySelector('.cu-remaining'), inner=ring.querySelector('.cu-time');
     outer.style.stroke=remain==null?'var(--color-usage-meter-track,#72757c)':remain<=10?'var(--color-usage-meter-warning,#d87474)':remain<=30?'var(--color-usage-meter-warning,#c6a66f)':'var(--color-usage-meter-fill,#a2a6ad)';
     outer.style.strokeDasharray=`${2*Math.PI*remainingRadius}`;outer.style.strokeDashoffset=`${2*Math.PI*remainingRadius*(1-(remain??0)/100)}`;
-    outer.style.opacity=remain==null || expired?'.45':'1';
+    outer.style.opacity=remain>0?'1':'0';
     inner.style.stroke='color-mix(in srgb,var(--color-usage-meter-fill,#a2a6ad) 60%,transparent)';
     inner.style.strokeDasharray=`${2*Math.PI*timeRadius}`;inner.style.strokeDashoffset=`${2*Math.PI*timeRadius*(1-ratio)}`;
+    inner.style.opacity=ratio>0?'1':'0';
     ringButton.setAttribute('aria-label',expired?'Codex 额度待更新':w?`${w.label}剩余 ${pct(remain)}，距重置 ${countdown(left)}`:'Codex 额度暂不可用');
     renderPanel();positionPanel();
   }

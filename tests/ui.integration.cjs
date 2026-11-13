@@ -4,6 +4,7 @@ const path=require('node:path');
 const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW}=require('../src/protocol.cjs');
 const {quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation,footerInsetPresentation}=require('./ui-presentation.cjs');
 const {performancePresentation}=require('./ui-performance.cjs');
+const {quotaGeometryPresentation}=require('./quota-geometry.cjs');
 
 function measureMetricGeometry(container) {
   if(!container)return null;
@@ -236,7 +237,9 @@ async function selfTest() {
     win.webContents.send(NATIVE_FROM_VIEW,{type:'mcp-notification',hostId:'local',method:'account/rateLimits/updated',params:nativeLimits(0)});
     await delay(150);const refreshedQuota=await quotaState();
     fs.writeFileSync(output+'.quota-reset.png',(await win.webContents.capturePage()).toPNG());
+    const quotaGeometry=await quotaGeometryPresentation(win);
     const checks={
+      ...quotaGeometry.checks,
       ...quotaBehavior.checks,...nativeQuotaBehavior.checks,...numberBehavior.checks,...modes.checks,...footerInset.checks,
       metricChanges:metricChanges.animations>0&&metricChanges.labelOpacity===1&&metricChanges.tweens>0&&metricChanges.moved&&metricChanges.added,
       layout:!!report.strip&&report.stripHeight===46&&report.composerShift===8&&Math.abs(report.verticalCenterOffset)<.1,
@@ -279,7 +282,7 @@ async function selfTest() {
       expiredQuotaUnknown:expiredQuota.label.includes('待更新')&&expiredQuota.text.includes('剩余 —')&&!expiredQuota.text.includes('58%'),
       quotaResetAgain:refreshedQuota.label.includes('剩余 100%')&&refreshedQuota.text.includes('剩余 100%')&&refreshedQuota.errors.length===0
     });
-    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,quotaBehavior,nativeQuotaBehavior,numberBehavior,modes,footerInset,metricChanges,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,quotaPanelState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
+    write({ok:Object.values(checks).every(Boolean),checks,version:app.getVersion(),runtime:process.versions,quotaGeometry,quotaBehavior,nativeQuotaBehavior,numberBehavior,modes,footerInset,metricChanges,...report,hoverState,sessionPanel,tokenPanel,tokenOverview,modelPanel,retainedModel,restoredOverview,stableTokenTrack,tokenUnclassified,tokenClassifiedAgain,contextPanel,contextColors,contextUnclassified,contextPartial,contextClassifiedAgain,replyPanel,escapeState,outsideState,quotaPanelState,liveState,livePanel,finishedState,disabledState,enabledState,navigation:{switched,replacedActions,returned,waiting,rapidReturn,emptyThread},adaptation:{nestedComposer,siblingActions,replacedComposer,missingPortal},quotaRefresh:{resetQuota,protectedQuota,expiredQuota,refreshedQuota}});
     win.destroy(); app.exit(0);
   } catch (e) { write({ok:false,error:String(e),stack:e.stack}); app.exit(1); }
 }
