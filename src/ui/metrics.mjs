@@ -2,6 +2,8 @@ import { element, setText, iconSvg } from './elements.mjs';
 import { MetricMotion } from './motion.mjs';
 
 const textMeasure = document.createElement('canvas').getContext('2d', {willReadFrequently:true});
+const glyphs = new Map(), pendingAlignment = new Set();
+let alignmentQueued = false;
 
 function metric(icon, text, kind, turnId, onActivate) {
   const el = element('button','cu-metric');el.type='button';
@@ -14,36 +16,63 @@ function metric(icon, text, kind, turnId, onActivate) {
 
 export function alignMetrics(container) {
   if(!container || !textMeasure)return;
-  for(const label of container.querySelectorAll('.cu-metric-label')){
+  pendingAlignment.add(container);
+  if(alignmentQueued)return;
+  alignmentQueued=true;
+  queueMicrotask(flushAlignment);
+}
+
+function flushAlignment() {
+  alignmentQueued=false;
+  const labels=[...pendingAlignment].filter(node=>node.isConnected).flatMap(node=>[...node.querySelectorAll('.cu-metric-label')]);
+  pendingAlignment.clear();
+  // Write once, measure all rows, then apply offsets: no layout flush per label.
+  const rows=labels.map(label=>{
     const row=label.parentElement,svg=row.querySelector('svg');
     label.style.removeProperty('transform');svg?.style.removeProperty('transform');
+    const marker=element('span');marker.style.cssText='display:inline-block;width:0;height:0;vertical-align:baseline;margin:0;padding:0;border:0';
+    label.append(marker);return {label,row,svg,marker};
+  });
+  const offsets=rows.map(({label,row,svg,marker})=>{
     const bounds=row.getBoundingClientRect(),target=bounds.top+bounds.height/2;
     const style=getComputedStyle(label);
     const scale=label.getBoundingClientRect().height/(parseFloat(style.height)||20);
-    textMeasure.font=[style.fontStyle,style.fontWeight,style.fontSize,style.fontFamily].join(' ');
+    if(!scale)return {label,svg,marker,shift:0,iconShift:0};
     const text=label.textContent,font=[style.fontStyle,style.fontWeight,style.fontSize,style.fontFamily].join(' ');
-    const width=textMeasure.measureText(text).width;
-    const marker=element('span');marker.style.cssText='display:inline-block;width:0;height:0;vertical-align:baseline;margin:0;padding:0;border:0';
-    label.append(marker);const baseline=marker.getBoundingClientRect().top;marker.remove();
+    const baseline=marker.getBoundingClientRect().top;
     // 以当前缩放栅格化字形，保留基线的像素相位，避免字体回退和 hinting 造成高低差。
     const dpr=devicePixelRatio||1,pixelScale=dpr*scale,size=parseFloat(style.fontSize);
-    textMeasure.canvas.width=Math.max(1,Math.ceil((width+8)*pixelScale));
-    textMeasure.canvas.height=Math.ceil((size*4+8)*pixelScale);
     const reference=Math.ceil(size*2*pixelScale)+(baseline*dpr%1);
-    textMeasure.setTransform(pixelScale,0,0,pixelScale,0,0);textMeasure.font=font;textMeasure.fillStyle='#fff';
-    textMeasure.fillText(text,4,reference/pixelScale);
-    const pixels=textMeasure.getImageData(0,0,textMeasure.canvas.width,textMeasure.canvas.height);
-    let top=pixels.height,bottom=-1;
-    for(let y=0;y<pixels.height;y++)for(let x=0;x<pixels.width;x++)if(pixels.data[(y*pixels.width+x)*4+3]>24){top=Math.min(top,y);bottom=Math.max(bottom,y);break;}
-    const center=bottom<0?target:baseline+((top+bottom+1)/2-reference)/dpr;
+    const key=JSON.stringify([font,text,pixelScale,reference]);
+    let glyph=glyphs.get(key);
+    if(glyph===undefined){
+      textMeasure.font=font;
+      const width=textMeasure.measureText(text).width;
+      textMeasure.canvas.width=Math.max(1,Math.ceil((width+8)*pixelScale));
+      textMeasure.canvas.height=Math.ceil((size*4+8)*pixelScale);
+      textMeasure.setTransform(pixelScale,0,0,pixelScale,0,0);textMeasure.font=font;textMeasure.fillStyle='#fff';
+      textMeasure.fillText(text,4,reference/pixelScale);
+      const pixels=textMeasure.getImageData(0,0,textMeasure.canvas.width,textMeasure.canvas.height);
+      let top=pixels.height,bottom=-1;
+      for(let y=0;y<pixels.height;y++)for(let x=0;x<pixels.width;x++)if(pixels.data[(y*pixels.width+x)*4+3]>24){top=Math.min(top,y);bottom=Math.max(bottom,y);break;}
+      glyph=bottom<0?null:(top+bottom+1)/2-reference;
+      glyphs.set(key,glyph);
+      while(glyphs.size>512)glyphs.delete(glyphs.keys().next().value);
+    }
+    const center=glyph===null?target:baseline+glyph/dpr;
     const shift=Math.round((target-center)*dpr)/dpr;
-    label.style.transform=`translateY(${shift/scale}px)`;
     const glyphCenter=center+shift;
+    let iconShift=0;
     if(svg){
       const box=svg.getBBox(),matrix=svg.getScreenCTM();
-      const iconCenter=matrix.b*(box.x+box.width/2)+matrix.d*(box.y+box.height/2)+matrix.f;
-      svg.style.transform=`translateY(${(glyphCenter-iconCenter)/scale}px)`;
+      if(matrix){const iconCenter=matrix.b*(box.x+box.width/2)+matrix.d*(box.y+box.height/2)+matrix.f;
+        iconShift=(glyphCenter-iconCenter)/scale;}
     }
+    return {label,svg,marker,shift:shift/scale,iconShift};
+  });
+  for(const {label,svg,marker,shift,iconShift} of offsets){
+    marker.remove();label.style.transform=`translateY(${shift}px)`;
+    if(svg)svg.style.transform=`translateY(${iconShift}px)`;
   }
 }
 

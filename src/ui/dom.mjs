@@ -40,10 +40,29 @@ export class CodexDOM {
   constructor() {
     this.footers = new Set();
     this.actions = new Set();
+    this.visibilityNodes = new Set();
+  }
+  watchVisibility(callback) {
+    // Observe only composer ancestors, not every class/style mutation in streamed text.
+    this.visibilityObserver = new MutationObserver(records => {
+      const normalize = (value, name) => name === 'class'
+        ? (value ?? '').split(/\s+/).filter(x => x && !x.startsWith('cu-')).sort().join(' ')
+        : (value ?? '').split(';').map(x=>x.trim()).filter(x=>/^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(';');
+      if(records.some(r => normalize(r.oldValue,r.attributeName) !== normalize(r.target.getAttribute(r.attributeName),r.attributeName)))callback();
+    });
+  }
+  trackVisibility(nodes) {
+    const next = new Set();
+    for(const node of nodes)for(let parent=node;parent;parent=parent.parentElement)next.add(parent);
+    if(next.size === this.visibilityNodes.size && [...next].every(node=>this.visibilityNodes.has(node)))return;
+    this.visibilityNodes=next;
+    this.visibilityObserver?.disconnect();
+    for(const node of next)this.visibilityObserver?.observe(node,{attributes:true,attributeOldValue:true,attributeFilter:['class','style']});
   }
   composer() {
-    const nodes = [...new Set([...document.querySelectorAll('[data-thread-find-composer]')]
-      .filter(node => !node.matches('button,input,textarea') && visible(node)).map(composerRoot))];
+    const all = [...document.querySelectorAll('[data-thread-find-composer]')].filter(node=>!node.matches('button,input,textarea'));
+    this.trackVisibility(all);
+    const nodes = [...new Set(all.filter(visible).map(composerRoot))];
     const footers = nodes.filter(node => node.closest('[data-thread-scroll-footer]'));
     const candidates = footers.length ? footers : nodes;
     return candidates.find(node => node.contains(document.activeElement)) ?? candidates.at(-1) ?? null;
@@ -63,19 +82,21 @@ export class CodexDOM {
     return Boolean(composer?.matches('[data-chatgpt-composer]') ||
       [...(composer?.querySelectorAll('[data-chatgpt-composer]') ?? [])].some(visible));
   }
-  scan(snapshot) {
-    const composer = this.composer();
-    const id = this.thread(composer);
+  context() {
+    const composer=this.composer();
+    return {composer,id:this.thread(composer)};
+  }
+  scan(snapshot, {composer,id} = this.context()) {
     const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map(turn => [turn.id, turn]));
     const replies = new Map();
     const latest = new Map();
     for (const response of document.querySelectorAll('[data-response-annotation-conversation]')) {
-      if (normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id || !visible(response)) continue;
+      if (normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id) continue;
       let root = response.closest('[data-content-search-turn-key]');
       let key = null;
       while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest('[data-content-search-turn-key]');
       const turn = turns.get(key);
-      if (!turn?.completed) continue;
+      if (!turn?.completed || !visible(response)) continue;
       latest.set(key, {turn, response, root});
     }
     for (const [key, {turn, response, root}] of latest) {
@@ -139,6 +160,8 @@ export class CodexDOM {
         return !['hidden','aria-hidden','inert'].includes(record.attributeName) || structural(target);
       }
       const nodes=[...record.addedNodes,...record.removedNodes];
+      // React may remove an injected row without changing any native marker.
+      if([...record.removedNodes].some(node=>node.nodeType===1&&node.matches('.cu-strip,.cu-turn')&&!node.isConnected))return true;
       if(nodes.some(structural))return true;
       // Reconcile native siblings of the strip without depending on periodic scans.
       return target?.matches('[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]')&&
@@ -146,6 +169,8 @@ export class CodexDOM {
     });
   }
   dispose() {
+    this.visibilityObserver?.disconnect();
+    this.visibilityNodes.clear();
     for (const footer of this.footers) {
       footer.classList.remove('cu-footer');
       footer.style.removeProperty('--cu-strip-height');

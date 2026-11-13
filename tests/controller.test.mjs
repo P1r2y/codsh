@@ -35,11 +35,31 @@ test('快速往返仍拒绝旧版本请求，刷新合并为一次后续读取',
   controller.select(first); void controller.refresh(); void controller.refresh();
   reads[0].resolve({threadId:first, obsolete:true}); await tick();
   assert.equal(controller.snapshot, null);
-  assert.equal(reads.length, 2);
-  reads[1].resolve({threadId:first, fresh:true}); await tick();
+  assert.equal(reads.length, 3);
+  assert.equal(reads[1].id, second);
+  reads[2].resolve({threadId:first, fresh:true}); await tick();
   assert.equal(controller.snapshot.fresh, true);
-  assert.equal(reads.length, 2);
+  reads[1].resolve({threadId:second, obsolete:true}); await tick();
+  assert.equal(controller.snapshot.fresh, true);
   controller.dispose();
+});
+
+test('返回已读会话即时复用数据，并且不等待另一会话的慢请求', async () => {
+  const reads=[];
+  const controller=new ConversationController(id=>new Promise(resolve=>reads.push({id,resolve})),()=>{});
+  controller.select(first);const initial=controller.refresh();await tick();
+  reads[0].resolve({threadId:first,revision:'one',total:10});await initial;
+  controller.select(second);const slow=controller.refresh();await tick();
+  controller.select(first);
+  assert.equal(controller.snapshot.total,10);
+  const back=controller.refresh();await tick();
+  assert.equal(reads[2].id,first);
+  reads[2].resolve({threadId:first,revision:'two',total:12});await back;
+  reads[1].resolve({threadId:second,total:99});await slow;
+  assert.equal(controller.snapshot.total,12);
+  controller.select(null);await controller.refresh();
+  assert.equal(reads.length,3);
+  controller.dispose();assert.equal(controller.history.size,0);
 });
 
 test('销毁后忽略在途读取，事件和计时器统一释放', async () => {

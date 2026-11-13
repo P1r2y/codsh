@@ -1,4 +1,4 @@
-// codsh-source-sha256:f69e728972ee2355b2d248fb4da3dd276be10cd5714b8f513de8ee6ad4028a01
+// codsh-source-sha256:cb8fa10c70744f09a28e700d95b03a9dda39856f5399e306e0d46282d451e275
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -181,7 +181,8 @@
       this.threadId = null;
       this.snapshot = null;
       this.revision = 0;
-      this.inflight = null;
+      this.inflight = /* @__PURE__ */ new Map();
+      this.history = /* @__PURE__ */ new Map();
       this.pending = false;
       this.disposed = false;
     }
@@ -190,14 +191,14 @@
       const id = import_protocol.default.normalizeThreadId(value);
       if (id === this.threadId) return false;
       this.threadId = id;
-      this.snapshot = null;
+      this.snapshot = this.history.get(id) ?? null;
       this.revision++;
       this.onChange(true);
       return true;
     }
     async refresh() {
-      if (this.disposed) return;
-      if (this.inflight) {
+      if (this.disposed || !this.threadId) return;
+      if (this.inflight.has(this.threadId) || this.inflight.size >= 2) {
         this.pending = true;
         return;
       }
@@ -205,7 +206,7 @@
       const revision = this.revision;
       const knownRevision = this.snapshot?.revision;
       const task = Promise.resolve().then(() => this.read(id, knownRevision));
-      this.inflight = task;
+      this.inflight.set(id, task);
       try {
         const next = await task;
         if (!this.disposed && revision === this.revision && next?.threadId === id) {
@@ -221,13 +222,16 @@
             const sameRevision = next.revision && next.revision === this.snapshot?.revision;
             const live = next.turns?.some((turn) => !turn.completed);
             this.snapshot = next;
+            this.history.delete(id);
+            this.history.set(id, next);
+            while (this.history.size > 6) this.history.delete(this.history.keys().next().value);
             if (!sameRevision || live) this.onChange(false);
           }
         }
       } catch (error) {
         if (!this.disposed) console.warn("[CodexUsageUI]", String(error));
       } finally {
-        this.inflight = null;
+        this.inflight.delete(id);
         if (this.pending && !this.disposed) {
           this.pending = false;
           void this.refresh();
@@ -239,6 +243,7 @@
       this.revision++;
       this.pending = false;
       this.snapshot = null;
+      this.history.clear();
     }
   };
 
@@ -345,9 +350,26 @@
     constructor() {
       this.footers = /* @__PURE__ */ new Set();
       this.actions = /* @__PURE__ */ new Set();
+      this.visibilityNodes = /* @__PURE__ */ new Set();
+    }
+    watchVisibility(callback) {
+      this.visibilityObserver = new MutationObserver((records) => {
+        const normalize = (value, name) => name === "class" ? (value ?? "").split(/\s+/).filter((x) => x && !x.startsWith("cu-")).sort().join(" ") : (value ?? "").split(";").map((x) => x.trim()).filter((x) => /^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(";");
+        if (records.some((r) => normalize(r.oldValue, r.attributeName) !== normalize(r.target.getAttribute(r.attributeName), r.attributeName))) callback();
+      });
+    }
+    trackVisibility(nodes) {
+      const next = /* @__PURE__ */ new Set();
+      for (const node of nodes) for (let parent = node; parent; parent = parent.parentElement) next.add(parent);
+      if (next.size === this.visibilityNodes.size && [...next].every((node) => this.visibilityNodes.has(node))) return;
+      this.visibilityNodes = next;
+      this.visibilityObserver?.disconnect();
+      for (const node of next) this.visibilityObserver?.observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ["class", "style"] });
     }
     composer() {
-      const nodes = [...new Set([...document.querySelectorAll("[data-thread-find-composer]")].filter((node) => !node.matches("button,input,textarea") && visible(node)).map(composerRoot))];
+      const all = [...document.querySelectorAll("[data-thread-find-composer]")].filter((node) => !node.matches("button,input,textarea"));
+      this.trackVisibility(all);
+      const nodes = [...new Set(all.filter(visible).map(composerRoot))];
       const footers = nodes.filter((node) => node.closest("[data-thread-scroll-footer]"));
       const candidates = footers.length ? footers : nodes;
       return candidates.find((node) => node.contains(document.activeElement)) ?? candidates.at(-1) ?? null;
@@ -365,19 +387,21 @@
     chatMode(composer) {
       return Boolean(composer?.matches("[data-chatgpt-composer]") || [...composer?.querySelectorAll("[data-chatgpt-composer]") ?? []].some(visible));
     }
-    scan(snapshot) {
+    context() {
       const composer = this.composer();
-      const id = this.thread(composer);
+      return { composer, id: this.thread(composer) };
+    }
+    scan(snapshot, { composer, id } = this.context()) {
       const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map((turn) => [turn.id, turn]));
       const replies = /* @__PURE__ */ new Map();
       const latest = /* @__PURE__ */ new Map();
       for (const response of document.querySelectorAll("[data-response-annotation-conversation]")) {
-        if (normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id || !visible(response)) continue;
+        if (normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) continue;
         let root = response.closest("[data-content-search-turn-key]");
         let key = null;
         while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest("[data-content-search-turn-key]");
         const turn = turns.get(key);
-        if (!turn?.completed) continue;
+        if (!turn?.completed || !visible(response)) continue;
         latest.set(key, { turn, response, root });
       }
       for (const [key, { turn, response, root }] of latest) {
@@ -434,11 +458,14 @@
           return !["hidden", "aria-hidden", "inert"].includes(record.attributeName) || structural(target);
         }
         const nodes = [...record.addedNodes, ...record.removedNodes];
+        if ([...record.removedNodes].some((node) => node.nodeType === 1 && node.matches(".cu-strip,.cu-turn") && !node.isConnected)) return true;
         if (nodes.some(structural)) return true;
         return target?.matches("[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]") && nodes.some((node) => node.nodeType === 1 && !node.matches(OWN));
       });
     }
     dispose() {
+      this.visibilityObserver?.disconnect();
+      this.visibilityNodes.clear();
       for (const footer of this.footers) {
         footer.classList.remove("cu-footer");
         footer.style.removeProperty("--cu-strip-height");
@@ -608,6 +635,9 @@
 
   // src/ui/metrics.mjs
   var textMeasure = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  var glyphs = /* @__PURE__ */ new Map();
+  var pendingAlignment = /* @__PURE__ */ new Set();
+  var alignmentQueued = false;
   function metric(icon, text, kind, turnId2, onActivate) {
     const el = element("button", "cu-metric");
     el.type = "button";
@@ -623,45 +653,72 @@
   }
   function alignMetrics(container) {
     if (!container || !textMeasure) return;
-    for (const label of container.querySelectorAll(".cu-metric-label")) {
+    pendingAlignment.add(container);
+    if (alignmentQueued) return;
+    alignmentQueued = true;
+    queueMicrotask(flushAlignment);
+  }
+  function flushAlignment() {
+    alignmentQueued = false;
+    const labels = [...pendingAlignment].filter((node) => node.isConnected).flatMap((node) => [...node.querySelectorAll(".cu-metric-label")]);
+    pendingAlignment.clear();
+    const rows = labels.map((label) => {
       const row = label.parentElement, svg = row.querySelector("svg");
       label.style.removeProperty("transform");
       svg?.style.removeProperty("transform");
-      const bounds = row.getBoundingClientRect(), target = bounds.top + bounds.height / 2;
-      const style = getComputedStyle(label);
-      const scale = label.getBoundingClientRect().height / (parseFloat(style.height) || 20);
-      textMeasure.font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(" ");
-      const text = label.textContent, font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(" ");
-      const width = textMeasure.measureText(text).width;
       const marker = element("span");
       marker.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline;margin:0;padding:0;border:0";
       label.append(marker);
+      return { label, row, svg, marker };
+    });
+    const offsets = rows.map(({ label, row, svg, marker }) => {
+      const bounds = row.getBoundingClientRect(), target = bounds.top + bounds.height / 2;
+      const style = getComputedStyle(label);
+      const scale = label.getBoundingClientRect().height / (parseFloat(style.height) || 20);
+      if (!scale) return { label, svg, marker, shift: 0, iconShift: 0 };
+      const text = label.textContent, font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(" ");
       const baseline = marker.getBoundingClientRect().top;
-      marker.remove();
       const dpr = devicePixelRatio || 1, pixelScale = dpr * scale, size = parseFloat(style.fontSize);
-      textMeasure.canvas.width = Math.max(1, Math.ceil((width + 8) * pixelScale));
-      textMeasure.canvas.height = Math.ceil((size * 4 + 8) * pixelScale);
       const reference = Math.ceil(size * 2 * pixelScale) + baseline * dpr % 1;
-      textMeasure.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
-      textMeasure.font = font;
-      textMeasure.fillStyle = "#fff";
-      textMeasure.fillText(text, 4, reference / pixelScale);
-      const pixels = textMeasure.getImageData(0, 0, textMeasure.canvas.width, textMeasure.canvas.height);
-      let top = pixels.height, bottom = -1;
-      for (let y = 0; y < pixels.height; y++) for (let x = 0; x < pixels.width; x++) if (pixels.data[(y * pixels.width + x) * 4 + 3] > 24) {
-        top = Math.min(top, y);
-        bottom = Math.max(bottom, y);
-        break;
+      const key = JSON.stringify([font, text, pixelScale, reference]);
+      let glyph = glyphs.get(key);
+      if (glyph === void 0) {
+        textMeasure.font = font;
+        const width = textMeasure.measureText(text).width;
+        textMeasure.canvas.width = Math.max(1, Math.ceil((width + 8) * pixelScale));
+        textMeasure.canvas.height = Math.ceil((size * 4 + 8) * pixelScale);
+        textMeasure.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
+        textMeasure.font = font;
+        textMeasure.fillStyle = "#fff";
+        textMeasure.fillText(text, 4, reference / pixelScale);
+        const pixels = textMeasure.getImageData(0, 0, textMeasure.canvas.width, textMeasure.canvas.height);
+        let top = pixels.height, bottom = -1;
+        for (let y = 0; y < pixels.height; y++) for (let x = 0; x < pixels.width; x++) if (pixels.data[(y * pixels.width + x) * 4 + 3] > 24) {
+          top = Math.min(top, y);
+          bottom = Math.max(bottom, y);
+          break;
+        }
+        glyph = bottom < 0 ? null : (top + bottom + 1) / 2 - reference;
+        glyphs.set(key, glyph);
+        while (glyphs.size > 512) glyphs.delete(glyphs.keys().next().value);
       }
-      const center = bottom < 0 ? target : baseline + ((top + bottom + 1) / 2 - reference) / dpr;
+      const center = glyph === null ? target : baseline + glyph / dpr;
       const shift = Math.round((target - center) * dpr) / dpr;
-      label.style.transform = `translateY(${shift / scale}px)`;
       const glyphCenter = center + shift;
+      let iconShift = 0;
       if (svg) {
         const box = svg.getBBox(), matrix = svg.getScreenCTM();
-        const iconCenter = matrix.b * (box.x + box.width / 2) + matrix.d * (box.y + box.height / 2) + matrix.f;
-        svg.style.transform = `translateY(${(glyphCenter - iconCenter) / scale}px)`;
+        if (matrix) {
+          const iconCenter = matrix.b * (box.x + box.width / 2) + matrix.d * (box.y + box.height / 2) + matrix.f;
+          iconShift = (glyphCenter - iconCenter) / scale;
+        }
       }
+      return { label, svg, marker, shift: shift / scale, iconShift };
+    });
+    for (const { label, svg, marker, shift, iconShift } of offsets) {
+      marker.remove();
+      label.style.transform = `translateY(${shift}px)`;
+      if (svg) svg.style.transform = `translateY(${iconShift}px)`;
     }
   }
   var MetricGroup = class {
@@ -1187,7 +1244,10 @@
       this.controller = new ConversationController(
         (id, knownRevision) => ipc.invoke(import_protocol4.default.READ_CHANNEL, { threadId: id, knownRevision }),
         (changed2, liveOnly) => {
-          if (changed2) this.details.close();
+          if (changed2) {
+            this.details.close();
+            return;
+          }
           if (liveOnly) this.renderLive();
           else this.render();
         }
@@ -1203,10 +1263,11 @@
     group(node, animated = false) {
       return new MetricGroup(node, (button) => this.details.toggle(button), (node2) => this.details.remove(node2), animated);
     }
-    synchronize() {
+    synchronize(context = this.dom.context()) {
       if (this.life.disposed) return;
       this.lastSync = Date.now();
-      this.controller.select(this.dom.thread());
+      this.controller.select(context.id);
+      this.render(context);
       if (document.visibilityState === "hidden") return;
       void this.controller.refresh();
       void this.quotaState.refresh();
@@ -1239,14 +1300,14 @@
       this.lastQuotaPaint = Date.now();
       this.quota.render({ limits: this.quotaState.limits }, this.quotaMount);
     }
-    render() {
+    render(context = this.dom.context()) {
       if (this.life.disposed || !document.body) return;
       const snapshot = this.controller.snapshot;
-      const view = this.dom.scan(snapshot);
-      if (view.id !== this.controller.threadId) {
-        this.synchronize();
+      if (context.id !== this.controller.threadId) {
+        this.synchronize(context);
         return;
       }
+      const view = this.dom.scan(snapshot, context);
       if (view.composer && !view.chat) {
         this.dom.alignComposer(view.composer);
         this.strip.mount(view.composer);
@@ -1296,18 +1357,21 @@
       this.started = true;
       document.head.append(this.style);
       document.documentElement.dataset.cuUi = "ready";
-      const observer = new MutationObserver((records) => {
-        if (!this.dom.relevant(records)) return;
+      const reconcile = (urgent = false) => {
         if (this.renderTimer) return;
-        const urgent = records.some((record) => record.type === "attributes");
         this.renderTimer = setTimeout(() => {
           this.renderTimer = null;
-          if (this.dom.thread() !== this.controller.threadId) this.synchronize();
+          if (document.visibilityState === "hidden") return;
+          const context = this.dom.context();
+          if (context.id !== this.controller.threadId) this.synchronize(context);
           else {
-            this.render();
-            if (!this.controller.snapshot?.eventDriven && Date.now() - this.lastSync >= 1800) this.synchronize();
+            this.render(context);
           }
         }, urgent ? 0 : 80);
+      };
+      this.dom.watchVisibility(() => reconcile(true));
+      const observer = new MutationObserver((records) => {
+        if (this.dom.relevant(records)) reconcile(records.some((record) => record.type === "attributes"));
       });
       observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: [
         "data-above-composer-conversation-id",
@@ -1357,7 +1421,6 @@
         if (!this.life.disposed) this.align();
       });
       this.synchronize();
-      this.render();
     }
     dispose() {
       if (this.life.disposed) return;

@@ -31,7 +31,7 @@ export class UsagePlugin {
     this.controller = new ConversationController(
       (id, knownRevision) => ipc.invoke(protocol.READ_CHANNEL, {threadId:id, knownRevision}),
       (changed, liveOnly) => {
-        if (changed) this.details.close();
+        if (changed) { this.details.close(); return; }
         if (liveOnly) this.renderLive(); else this.render();
       }
     );
@@ -46,10 +46,11 @@ export class UsagePlugin {
   group(node, animated = false) {
     return new MetricGroup(node, button => this.details.toggle(button), node => this.details.remove(node), animated);
   }
-  synchronize() {
+  synchronize(context = this.dom.context()) {
     if (this.life.disposed) return;
     this.lastSync = Date.now();
-    this.controller.select(this.dom.thread());
+    this.controller.select(context.id);
+    this.render(context);
     if(document.visibilityState==='hidden')return;
     void this.controller.refresh();
     void this.quotaState.refresh();
@@ -82,11 +83,11 @@ export class UsagePlugin {
     this.lastQuotaPaint=Date.now();
     this.quota.render({limits:this.quotaState.limits},this.quotaMount);
   }
-  render() {
+  render(context = this.dom.context()) {
     if (this.life.disposed || !document.body) return;
     const snapshot = this.controller.snapshot;
-    const view = this.dom.scan(snapshot);
-    if (view.id !== this.controller.threadId) { this.synchronize(); return; }
+    if (context.id !== this.controller.threadId) { this.synchronize(context); return; }
+    const view = this.dom.scan(snapshot,context);
     if (view.composer && !view.chat) {
       this.dom.alignComposer(view.composer);
       this.strip.mount(view.composer);
@@ -133,18 +134,21 @@ export class UsagePlugin {
     this.started = true;
     document.head.append(this.style);
     document.documentElement.dataset.cuUi = 'ready';
-    const observer = new MutationObserver(records => {
-      if (!this.dom.relevant(records)) return;
+    const reconcile = (urgent = false) => {
       if (this.renderTimer) return;
-      const urgent = records.some(record => record.type === 'attributes');
       this.renderTimer = setTimeout(() => {
         this.renderTimer = null;
-        if (this.dom.thread() !== this.controller.threadId) this.synchronize();
+        if (document.visibilityState==='hidden') return;
+        const context=this.dom.context();
+        if (context.id !== this.controller.threadId) this.synchronize(context);
         else {
-          this.render();
-          if (!this.controller.snapshot?.eventDriven&&Date.now() - this.lastSync >= 1800) this.synchronize();
+          this.render(context);
         }
       }, urgent ? 0 : 80);
+    };
+    this.dom.watchVisibility(()=>reconcile(true));
+    const observer = new MutationObserver(records => {
+      if(this.dom.relevant(records))reconcile(records.some(record=>record.type==='attributes'));
     });
     observer.observe(document.body, {childList:true,subtree:true,attributes:true,attributeFilter:[
       'data-above-composer-conversation-id','data-content-search-turn-key',
@@ -176,7 +180,6 @@ export class UsagePlugin {
     this.life.listen(window, 'beforeunload', () => this.dispose(), {once:true});
     document.fonts?.ready.then(() => { if (!this.life.disposed) this.align(); });
     this.synchronize();
-    this.render();
   }
   dispose() {
     if (this.life.disposed) return;

@@ -3,8 +3,9 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW,CHANGE_CHANNEL}=require('../src/protocol.cjs');
 const {quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation,footerInsetPresentation}=require('./ui-presentation.cjs');
-const {performancePresentation}=require('./ui-performance.cjs');
+const {performancePresentation,switchingPresentation}=require('./ui-performance.cjs');
 const {quotaGeometryPresentation}=require('./quota-geometry.cjs');
+const {navigationPresentation}=require('./ui-navigation.cjs');
 
 function measureMetricGeometry(container) {
   if(!container)return null;
@@ -36,6 +37,7 @@ async function selfTest() {
     const workerState=await backgroundCache.request('stats');
     await backgroundCache.dispose();
     const fixture = JSON.parse(fs.readFileSync(path.join(__dirname,'fixture.json'),'utf8'));
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='navigation')fixture.snapshot.revision='nav-first';
     // Synthetic speed samples use explicit durations rather than the wall clock.
     fixture.snapshot.turns.forEach(turn=>{turn.startedAt=null;});
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance') {
@@ -46,7 +48,7 @@ async function selfTest() {
     }
     const snapshots=new Map([[fixture.snapshot.threadId,fixture.snapshot]]),responseDelays=new Map();
     let pluginEnabled=true;
-    let pluginCode=fs.readFileSync(path.join(__dirname,'../dist/usage-preload.cjs'),'utf8');
+    let pluginCode=fs.readFileSync(process.env.CODEX_USAGE_UI_TEST_BUNDLE??path.join(__dirname,'../dist/usage-preload.cjs'),'utf8');
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance')pluginCode=`(()=>{
       let active=false,scans=0,layouts=0;
       const query=Document.prototype.querySelectorAll,rects=Element.prototype.getClientRects;
@@ -61,6 +63,8 @@ async function selfTest() {
       const id=request?.threadId,delay=responseDelays.get(id)??0;
       if(id)conversationReads++;
       if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
+      if(process.env.CODEX_USAGE_UI_TEST_CASE==='navigation'&&request.knownRevision&&request.knownRevision===snapshots.get(id)?.revision)
+        return {threadId:id,revision:request.knownRevision,unchanged:true,eventDriven:true};
       if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance' && id && request.knownRevision==='performance-v1') {
         const turn=fixture.snapshot.turns.at(-1);
         return {threadId:id,revision:'performance-v1',unchanged:true,eventDriven:true,liveTick:{id:turn.id,durationMs:Date.now()%100000,averageTps:(Date.now()%100000)/1000}};
@@ -77,6 +81,14 @@ async function selfTest() {
     },100);publishing.unref();
     await win.loadFile(path.join(__dirname,'fixture.html'));
     await new Promise(resolve=>setTimeout(resolve,2200));
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='switching') {
+      const report=await switchingPresentation(win,snapshots,fixture);
+      write({ok:Object.values(report.checks).every(Boolean),...report});win.destroy();app.exit(0);return;
+    }
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='navigation') {
+      const report=await navigationPresentation(win,snapshots,responseDelays,fixture);
+      write({ok:Object.values(report.checks).every(Boolean),...report});win.destroy();app.exit(0);return;
+    }
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance') {
       const before=conversationReads;
       const performance=await performancePresentation(win);

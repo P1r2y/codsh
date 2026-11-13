@@ -7,7 +7,8 @@ export class ConversationController {
     this.threadId = null;
     this.snapshot = null;
     this.revision = 0;
-    this.inflight = null;
+    this.inflight = new Map();
+    this.history = new Map();
     this.pending = false;
     this.disposed = false;
   }
@@ -16,14 +17,14 @@ export class ConversationController {
     const id = protocol.normalizeThreadId(value);
     if (id === this.threadId) return false;
     this.threadId = id;
-    this.snapshot = null;
+    this.snapshot = this.history.get(id) ?? null;
     this.revision++;
     this.onChange(true);
     return true;
   }
   async refresh() {
-    if (this.disposed) return;
-    if (this.inflight) {
+    if (this.disposed || !this.threadId) return;
+    if (this.inflight.has(this.threadId) || this.inflight.size >= 2) {
       this.pending = true;
       return;
     }
@@ -31,7 +32,7 @@ export class ConversationController {
     const revision = this.revision;
     const knownRevision = this.snapshot?.revision;
     const task = Promise.resolve().then(() => this.read(id, knownRevision));
-    this.inflight = task;
+    this.inflight.set(id, task);
     try {
       const next = await task;
       if (!this.disposed && revision === this.revision && next?.threadId === id) {
@@ -47,13 +48,16 @@ export class ConversationController {
           const sameRevision = next.revision && next.revision === this.snapshot?.revision;
           const live = next.turns?.some(turn => !turn.completed);
           this.snapshot = next;
+          this.history.delete(id);
+          this.history.set(id, next);
+          while(this.history.size > 6)this.history.delete(this.history.keys().next().value);
           if (!sameRevision || live) this.onChange(false);
         }
       }
     } catch (error) {
       if (!this.disposed) console.warn('[CodexUsageUI]', String(error));
     } finally {
-      this.inflight = null;
+      this.inflight.delete(id);
       if (this.pending && !this.disposed) {
         this.pending = false;
         void this.refresh();
@@ -65,5 +69,6 @@ export class ConversationController {
     this.revision++;
     this.pending = false;
     this.snapshot = null;
+    this.history.clear();
   }
 }
