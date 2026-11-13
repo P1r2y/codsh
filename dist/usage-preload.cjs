@@ -1,4 +1,4 @@
-// codsh-source-sha256:cb8fa10c70744f09a28e700d95b03a9dda39856f5399e306e0d46282d451e275
+// codsh-source-sha256:2478d0186e17ecb93a3407799ade22b4c0a9734f2208c901aee1b5504daeb6a6
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -169,6 +169,74 @@
       this.abort.abort();
       for (const dispose2 of this.cleanup.reverse()) dispose2();
       this.cleanup.length = 0;
+    }
+  };
+
+  // src/ui/background-scan.mjs
+  var BackgroundScan = class {
+    constructor({ interval = 1200, gap = 48, batchSize = 8, budgetMs = 3, now = () => performance.now() } = {}) {
+      Object.assign(this, { interval, gap, batchSize, budgetMs, now });
+      this.lastStarted = -Infinity;
+      this.timer = null;
+      this.idle = null;
+      this.pending = null;
+      this.iterator = null;
+      this.disposed = false;
+      this.requestIdle = globalThis.requestIdleCallback?.bind(globalThis) ?? ((fn) => setTimeout(() => fn({ didTimeout: false, timeRemaining: () => 50 }), 0));
+      this.cancelIdle = globalThis.cancelIdleCallback?.bind(globalThis) ?? clearTimeout;
+    }
+    request(factory) {
+      if (this.disposed) return;
+      this.pending = factory;
+      if (this.timer === null && this.idle === null) this.plan(Math.max(0, this.interval - (this.now() - this.lastStarted)));
+    }
+    plan(delay) {
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        this.idle = this.requestIdle((deadline) => {
+          this.idle = null;
+          this.run(deadline);
+        }, { timeout: 500 });
+      }, delay);
+    }
+    run(deadline) {
+      if (this.disposed) return;
+      if (!this.iterator) {
+        const factory = this.pending;
+        this.pending = null;
+        if (!factory) return;
+        this.iterator = factory();
+        this.lastStarted = this.now();
+      }
+      const start = this.now(), limit = deadline.didTimeout ? 1 : this.batchSize;
+      try {
+        for (let count = 0; count < limit; count++) {
+          if (count && (this.now() - start >= this.budgetMs || deadline.timeRemaining() < 1)) break;
+          if (this.iterator.next().done) {
+            this.iterator = null;
+            break;
+          }
+        }
+      } catch (error) {
+        this.iterator = null;
+        console.warn("[CodexUsageUI]", String(error));
+      }
+      if (this.iterator) this.plan(this.gap);
+      else if (this.pending) this.plan(Math.max(this.gap, this.interval - (this.now() - this.lastStarted)));
+    }
+    cancel() {
+      clearTimeout(this.timer);
+      if (this.idle !== null) this.cancelIdle(this.idle);
+      this.timer = null;
+      this.idle = null;
+      this.pending = null;
+      this.iterator?.return?.();
+      this.iterator = null;
+      this.lastStarted = -Infinity;
+    }
+    dispose() {
+      this.cancel();
+      this.disposed = true;
     }
   };
 
@@ -391,11 +459,11 @@
       const composer = this.composer();
       return { composer, id: this.thread(composer) };
     }
-    scan(snapshot, { composer, id } = this.context()) {
+    *scanReplies(snapshot, id) {
       const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map((turn) => [turn.id, turn]));
-      const replies = /* @__PURE__ */ new Map();
       const latest = /* @__PURE__ */ new Map();
       for (const response of document.querySelectorAll("[data-response-annotation-conversation]")) {
+        yield null;
         if (normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) continue;
         let root = response.closest("[data-content-search-turn-key]");
         let key = null;
@@ -405,10 +473,10 @@
         latest.set(key, { turn, response, root });
       }
       for (const [key, { turn, response, root }] of latest) {
+        if (!response.isConnected || normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) continue;
         const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1) ?? [...root.querySelectorAll(".turn-action-controls")].filter((node) => visible(node) && !node.closest("[data-response-annotation-conversation]") && Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
-        replies.set(key, { turn, parent: actions ?? response, inline: Boolean(actions) });
+        yield [key, { turn, parent: actions ?? response, inline: Boolean(actions) }];
       }
-      return { id, composer, chat: this.chatMode(composer), replies, quota: this.quotaMount() };
     }
     quotaMount() {
       const rail = [...document.querySelectorAll("[data-app-navigation-rail]")].find(visible);
@@ -1226,6 +1294,8 @@
       this.life = new Lifetime();
       this.dom = new CodexDOM();
       this.replies = /* @__PURE__ */ new Map();
+      this.replyScan = new BackgroundScan();
+      this.readTimer = null;
       this.renderTimer = null;
       this.lastSync = 0;
       this.details = createDetailsPopover(() => this.quota.hide());
@@ -1237,7 +1307,7 @@
       const changed = (_event, message) => {
         if (message?.threadId !== this.controller.threadId) return;
         if (this.controller.snapshot) this.controller.snapshot.eventDriven = message.watching !== false;
-        if (document.visibilityState !== "hidden") void this.controller.refresh();
+        if (document.visibilityState !== "hidden") this.refreshData();
       };
       ipc.on(import_protocol4.default.CHANGE_CHANNEL, changed);
       this.life.own(() => ipc.removeListener(import_protocol4.default.CHANGE_CHANNEL, changed));
@@ -1263,13 +1333,34 @@
     group(node, animated = false) {
       return new MetricGroup(node, (button) => this.details.toggle(button), (node2) => this.details.remove(node2), animated);
     }
-    synchronize(context = this.dom.context()) {
+    refreshData(immediate = false) {
+      if (this.life.disposed || document.visibilityState === "hidden" || !this.controller.threadId) return;
+      if (immediate) {
+        clearTimeout(this.readTimer);
+        this.readTimer = null;
+      }
+      if (this.readTimer !== null) return;
+      const delay = immediate ? 0 : Math.max(0, 5e3 - (Date.now() - this.lastSync));
+      this.readTimer = setTimeout(() => {
+        this.readTimer = null;
+        if (this.life.disposed || document.visibilityState === "hidden") return;
+        this.lastSync = Date.now();
+        void this.controller.refresh();
+      }, delay);
+    }
+    synchronize(context = this.dom.context(), immediate = false) {
       if (this.life.disposed) return;
-      this.lastSync = Date.now();
-      this.controller.select(context.id);
+      const switched = this.controller.select(context.id);
+      if (switched) {
+        this.replyScan.cancel();
+        clearTimeout(this.readTimer);
+        this.readTimer = null;
+        for (const group of this.replies.values()) group.dispose();
+        this.replies.clear();
+      }
       this.render(context);
       if (document.visibilityState === "hidden") return;
-      void this.controller.refresh();
+      this.refreshData(switched || immediate);
       void this.quotaState.refresh();
     }
     renderStrip(snapshot, id) {
@@ -1307,18 +1398,40 @@
         this.synchronize(context);
         return;
       }
-      const view = this.dom.scan(snapshot, context);
-      if (view.composer && !view.chat) {
-        this.dom.alignComposer(view.composer);
-        this.strip.mount(view.composer);
-        this.strip.node.dataset.cuThread = view.id ?? "";
-        this.renderStrip(snapshot, view.id);
+      if (context.composer && !this.dom.chatMode(context.composer)) {
+        this.dom.alignComposer(context.composer);
+        this.strip.mount(context.composer);
+        this.strip.node.dataset.cuThread = context.id ?? "";
+        this.renderStrip(snapshot, context.id);
       } else this.strip.unmount();
-      for (const [id, group] of this.replies) if (!view.replies.has(id)) {
-        group.dispose();
-        this.replies.delete(id);
+      if (snapshot?.available) this.replyScan.request(() => this.renderReplies());
+      else {
+        this.replyScan.cancel();
+        for (const group of this.replies.values()) group.dispose();
+        this.replies.clear();
       }
-      for (const [id, mount] of view.replies) {
+      this.quotaState.useFallback(snapshot?.limits);
+      this.quotaMount = this.dom.quotaMount();
+      this.renderQuota();
+      this.details.update(snapshot);
+      this.dom.reconcile();
+    }
+    *renderReplies() {
+      const threadId = this.controller.threadId, snapshot = this.controller.snapshot, keep = /* @__PURE__ */ new Set(), realign = this.realignReplies;
+      this.realignReplies = false;
+      if (!snapshot?.available) return;
+      for (const entry of this.dom.scanReplies(snapshot, threadId)) {
+        if (this.life.disposed || document.visibilityState === "hidden" || this.controller.threadId !== threadId) return;
+        if (!entry) {
+          yield;
+          continue;
+        }
+        const [id, mount] = entry;
+        if (!mount.parent.isConnected) {
+          yield;
+          continue;
+        }
+        keep.add(id);
         let group = this.replies.get(id);
         if (!group) {
           const node = element("div", "cu-turn");
@@ -1326,7 +1439,7 @@
           group = this.group(node);
           this.replies.set(id, group);
         }
-        group.node.dataset.cuThread = view.id;
+        group.node.dataset.cuThread = threadId;
         group.node.dataset.cuTurn = id;
         group.node.classList.toggle("cu-turn-inline", mount.inline);
         if (mount.inline) this.dom.markActions(mount.parent);
@@ -1337,18 +1450,21 @@
           { key: "cache", kind: "tokens", turnId: id, text: `\u7F13\u5B58 ${pct(turn.cacheHitPercent)}` },
           { key: "speed", kind: "session", turnId: id, text: speedLabel(turn) }
         ]);
+        if (realign) group.align();
+        yield;
       }
-      this.quotaState.useFallback(snapshot?.limits);
-      this.quotaMount = view.quota;
-      this.renderQuota();
-      this.details.update(snapshot);
+      for (const [id, group] of this.replies) if (!keep.has(id)) {
+        group.dispose();
+        this.replies.delete(id);
+      }
       this.dom.reconcile();
     }
     align() {
       const composer = this.dom.composer();
       if (!this.dom.chatMode(composer)) this.dom.alignComposer(composer, true);
       this.strip.align();
-      for (const group of this.replies.values()) group.align();
+      this.realignReplies = true;
+      this.replyScan.request(() => this.renderReplies());
       this.details.position();
       this.quota.position();
     }
@@ -1367,7 +1483,7 @@
           else {
             this.render(context);
           }
-        }, urgent ? 0 : 80);
+        }, urgent ? 80 : 200);
       };
       this.dom.watchVisibility(() => reconcile(true));
       const observer = new MutationObserver((records) => {
@@ -1386,7 +1502,12 @@
       this.life.listen(window, "resize", () => this.align());
       this.life.listen(window, "focus", () => this.synchronize());
       this.life.listen(document, "visibilitychange", () => {
-        if (document.visibilityState !== "hidden") this.synchronize();
+        if (document.visibilityState !== "hidden") this.synchronize(this.dom.context(), true);
+        else {
+          this.replyScan.cancel();
+          clearTimeout(this.readTimer);
+          this.readTimer = null;
+        }
       });
       this.life.listen(window, "popstate", () => this.synchronize());
       this.life.listen(window, "hashchange", () => this.synchronize());
@@ -1404,8 +1525,8 @@
         const turns = this.controller.snapshot?.turns ?? [];
         const live = Boolean(turns.at(-1) && !turns.at(-1).completed);
         const snapshot = this.controller.snapshot;
-        const interval = snapshot?.eventDriven ? 6e4 : !snapshot?.available || live ? 1800 : 3e4;
-        if (Date.now() - this.lastSync >= interval) this.synchronize();
+        const interval = snapshot?.eventDriven ? 6e4 : !snapshot?.available || live ? 5e3 : 3e4;
+        if (Date.now() - this.lastSync >= interval) this.refreshData();
         else if (live && snapshot?.eventDriven) {
           const turn = turns.at(-1), duration = turn.startedAt == null ? null : Math.max(0, Date.now() - turn.startedAt);
           if (duration != null) {
@@ -1415,7 +1536,7 @@
           }
         }
         if (Date.now() - (this.lastQuotaPaint ?? 0) >= 6e4) this.renderQuota();
-      }, 1800);
+      }, 2500);
       this.life.listen(window, "beforeunload", () => this.dispose(), { once: true });
       document.fonts?.ready.then(() => {
         if (!this.life.disposed) this.align();
@@ -1426,6 +1547,8 @@
       if (this.life.disposed) return;
       this.life.dispose();
       clearTimeout(this.renderTimer);
+      clearTimeout(this.readTimer);
+      this.replyScan.dispose();
       this.controller.dispose();
       this.quotaState.dispose();
       this.strip.dispose();

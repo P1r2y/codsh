@@ -3,7 +3,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {READ_CHANNEL:CHANNEL,NATIVE_FROM_VIEW,CHANGE_CHANNEL}=require('../src/protocol.cjs');
 const {quotaPresentation,modePresentation,watchMetricChanges,nativeQuotaPresentation,numberPresentation,footerInsetPresentation}=require('./ui-presentation.cjs');
-const {performancePresentation,switchingPresentation}=require('./ui-performance.cjs');
+const {performancePresentation,switchingPresentation,pacingPresentation}=require('./ui-performance.cjs');
 const {quotaGeometryPresentation}=require('./quota-geometry.cjs');
 const {navigationPresentation}=require('./ui-navigation.cjs');
 
@@ -58,10 +58,10 @@ async function selfTest() {
       document.addEventListener('codsh-performance-read',()=>{active=false;document.documentElement.dataset.fixturePerformance=JSON.stringify({scans,layouts});});
     })();\n`+pluginCode;
     ipcMain.handle('codex-enhancement-loader:state-v1',()=>({enabled:pluginEnabled,key:'fixture',code:pluginCode}));
-    let conversationReads=0;
+    let conversationReads=0;const readTimes=[];
     ipcMain.handle(CHANNEL,async(_event,request)=>{
       const id=request?.threadId,delay=responseDelays.get(id)??0;
-      if(id)conversationReads++;
+      if(id){conversationReads++;readTimes.push(Date.now());}
       if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
       if(process.env.CODEX_USAGE_UI_TEST_CASE==='navigation'&&request.knownRevision&&request.knownRevision===snapshots.get(id)?.revision)
         return {threadId:id,revision:request.knownRevision,unchanged:true,eventDriven:true};
@@ -81,6 +81,10 @@ async function selfTest() {
     },100);publishing.unref();
     await win.loadFile(path.join(__dirname,'fixture.html'));
     await new Promise(resolve=>setTimeout(resolve,2200));
+    if(process.env.CODEX_USAGE_UI_TEST_CASE==='pacing') {
+      const report=await pacingPresentation(win,fixture.snapshot,readTimes);
+      write({ok:Object.values(report.checks).every(Boolean),...report});win.destroy();app.exit(0);return;
+    }
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='switching') {
       const report=await switchingPresentation(win,snapshots,fixture);
       write({ok:Object.values(report.checks).every(Boolean),...report});win.destroy();app.exit(0);return;
@@ -111,7 +115,7 @@ async function selfTest() {
     const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='numbers') {
       fixture.snapshot.turns.at(-1).completed=false;fixture.snapshot.turns.at(-1).averageTps=62.5;
-      await delay(2100);
+      await delay(5200);
       const numbers=await numberPresentation(win,()=>{fixture.snapshot.turns.at(-1).averageTps=44.8;});
       write({ok:Object.values(numbers.checks).every(Boolean),checks:numbers.checks,numberBehavior:numbers});
       win.destroy();app.exit(0);return;
@@ -157,18 +161,18 @@ async function selfTest() {
     const originalTokens={total:fixture.snapshot.total,models:fixture.snapshot.models,cacheHitPercent:fixture.snapshot.cacheHitPercent};
     const totalOnly={input_tokens:0,cached_input_tokens:0,output_tokens:0,reasoning_output_tokens:0,total_tokens:68597};
     fixture.snapshot.total={...totalOnly};fixture.snapshot.models=[{model:null,usage:{...totalOnly},cacheHitPercent:null}];fixture.snapshot.cacheHitPercent=null;
-    await delay(2100);const tokenUnclassified=await tokenState();
-    Object.assign(fixture.snapshot,originalTokens);await delay(2100);const tokenClassifiedAgain=await tokenState();
+    await delay(5200);const tokenUnclassified=await tokenState();
+    Object.assign(fixture.snapshot,originalTokens);await delay(5200);const tokenClassifiedAgain=await tokenState();
     const contextPanel=await clickMetric('.cu-strip [data-cu-kind=context]','context');
     const contextColors=await win.webContents.executeJavaScript(`(()=>{const track=document.querySelector('.cu-context-track'),fill=document.querySelector('.cu-context-fill');return {fillRatio:fill.getBoundingClientRect().width/track.getBoundingClientRect().width,segments:[...fill.children].map(e=>({kind:e.dataset.cuCategory,color:getComputedStyle(e).backgroundColor,ratio:e.getBoundingClientRect().width/fill.getBoundingClientRect().width})),legend:[...document.querySelectorAll('.cu-stat-row[data-cu-category]')].map(e=>({kind:e.dataset.cuCategory,color:getComputedStyle(e.querySelector('.cu-context-dot')).backgroundColor}))}})()`);
     const originalContext={lastUsage:fixture.snapshot.lastUsage,contextWindow:fixture.snapshot.contextWindow,contextPercent:fixture.snapshot.contextPercent};
     const contextState=()=>win.webContents.executeJavaScript(`(()=>{const p=document.querySelector('.cu-panel'),track=p.querySelector('.cu-context-track'),fill=track.firstElementChild;return {text:p.textContent,fillRatio:fill.getBoundingClientRect().width/track.getBoundingClientRect().width,segments:[...fill.children].map(e=>({kind:e.dataset.cuCategory,color:getComputedStyle(e).backgroundColor,ratio:e.getBoundingClientRect().width/fill.getBoundingClientRect().width})),rows:[...p.querySelectorAll('.cu-stat-row[data-cu-category]')].map(e=>({kind:e.dataset.cuCategory,value:e.lastElementChild.textContent,color:getComputedStyle(e.querySelector('.cu-context-dot')).backgroundColor}))}})()`);
     fixture.snapshot.lastUsage={...totalOnly};fixture.snapshot.contextWindow=258400;fixture.snapshot.contextPercent=68597/258400*100;
-    await delay(2100);const contextUnclassified=await contextState();
+    await delay(5200);const contextUnclassified=await contextState();
     fs.writeFileSync(output+'.context-unclassified.png',(await win.webContents.capturePage()).toPNG());
     fixture.snapshot.lastUsage={...totalOnly,input_tokens:100,cached_input_tokens:80,total_tokens:150};fixture.snapshot.contextWindow=1000;fixture.snapshot.contextPercent=15;
-    await delay(2100);const contextPartial=await contextState();
-    Object.assign(fixture.snapshot,originalContext);await delay(2100);const contextClassifiedAgain=await contextState();
+    await delay(5200);const contextPartial=await contextState();
+    Object.assign(fixture.snapshot,originalContext);await delay(5200);const contextClassifiedAgain=await contextState();
     const replyPanel=await clickMetric('.cu-turn [data-cu-kind=tokens]','reply');
     await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);await delay(200);
     const escapeState=await panelState();
@@ -182,16 +186,20 @@ async function selfTest() {
     await win.webContents.executeJavaScript(`window.fixtureTokenAnchor=document.querySelector('.cu-strip [data-cu-kind=tokens]');window.fixtureTokenAnchor.click()`);await delay(220);
     fixture.snapshot.total.total_tokens+=1000;fixture.snapshot.total.input_tokens+=1000;
     fixture.snapshot.turns.at(-1).completed=false;fixture.snapshot.turns.at(-1).averageTps=62.5;
-    await delay(2100);
+    await delay(5200);
     const liveState=await win.webContents.executeJavaScript(`({...${alignmentScript},live:document.querySelector('[data-cu-live]')?.textContent,stableAnchor:window.fixtureTokenAnchor===document.querySelector('.cu-strip [data-cu-kind=tokens]')})`);
     const livePanel=await panelState();
     const metricChanges=await win.webContents.executeJavaScript(`window.fixtureMetricChanges`);
     const numberBehavior=await numberPresentation(win,()=>{fixture.snapshot.turns.at(-1).averageTps=44.8;});
-    fixture.snapshot.turns.at(-1).completed=true;await delay(2100);
+    fixture.snapshot.turns.at(-1).completed=true;await delay(5200);
     const finishedState=await win.webContents.executeJavaScript(`({live:!!document.querySelector('[data-cu-live]'),footers:document.querySelectorAll('.cu-turn').length})`);
     pluginEnabled=false;await delay(2300);
     const disabledState=await win.webContents.executeJavaScript(`({nodes:document.querySelectorAll('.cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel').length,nativeInset:parseFloat(getComputedStyle(document.querySelector('[data-thread-scroll-footer]')).paddingBottom),adjusted:document.querySelector('[data-thread-scroll-footer]').classList.contains('cu-footer'),actions:document.querySelectorAll('.cu-action-row').length,nativeQuota:document.querySelector('.native-usage').getClientRects().length>0})`);
     pluginEnabled=true;await delay(2300);
+    for(let attempt=0;attempt<30;attempt++){
+      if(await win.webContents.executeJavaScript(`document.querySelectorAll('.cu-turn').length===2`))break;
+      await delay(100);
+    }
     const enabledState=await win.webContents.executeJavaScript(`({ring:!!document.querySelector('.cu-ring'),footers:document.querySelectorAll('.cu-turn').length})`);
     const modes=await modePresentation(win);
     const footerInset=await footerInsetPresentation(win);
@@ -227,10 +235,10 @@ async function selfTest() {
       window.fixtureNavigate(${JSON.stringify(secondId)});
     })()`);
     const navigationState=()=>win.webContents.executeJavaScript(`(()=>{const active=[...document.querySelectorAll('main.chat')].find(e=>!e.hidden),strip=document.querySelector('.cu-strip'),footers=[...(active?.querySelectorAll('.cu-turn')??[])];return {strip:strip?.textContent,thread:strip?.dataset.cuThread,visibleFooters:footers.length,inline:footers.every(e=>{const a=e.getBoundingClientRect(),b=e.parentElement.getBoundingClientRect();return e.parentElement.classList.contains('turn-action-controls')&&Math.abs(a.y+a.height/2-b.y-b.height/2)<.5}),hiddenFooters:[...document.querySelectorAll('main.chat[hidden] .cu-turn')].length,turns:[...(active?.querySelectorAll('.cu-turn [data-cu-turn]')??[])].map(e=>e.dataset.cuTurn),panel:!!document.querySelector('.cu-panel[data-state=open]')}})()`);
-    await delay(2100);const switched=await navigationState();
+    await delay(5200);const switched=await navigationState();
     fs.writeFileSync(output+'.navigation.png',(await win.webContents.capturePage()).toPNG());
     await win.webContents.executeJavaScript(`(()=>{const row=document.querySelector('main[data-fixture-view=second] .turn-action-controls'),next=row.cloneNode(true);next.querySelectorAll('.cu-turn').forEach(e=>e.remove());row.replaceWith(next);})()`);
-    await delay(250);const replacedActions=await navigationState();
+    await delay(1600);const replacedActions=await navigationState();
     await win.webContents.executeJavaScript(`window.fixtureNavigate(${JSON.stringify(fixture.snapshot.threadId)})`);await delay(250);const returned=await navigationState();
     responseDelays.set(secondId,450);
     await win.webContents.executeJavaScript(`window.fixtureNavigate(${JSON.stringify(secondId)})`);await delay(80);
@@ -259,7 +267,7 @@ async function selfTest() {
       const root=document.querySelector('main[data-fixture-view=first] [data-content-search-turn-key]'),response=root.querySelector('[data-response-annotation-conversation]');
       const actions=response.querySelector('.turn-action-controls');actions.dataset.fixtureSibling='true';root.append(actions);
       const userActions=document.createElement('div');userActions.className='turn-action-controls';root.prepend(userActions);
-    })()`);await delay(250);
+    })()`);await delay(1600);
     const siblingActions=await adapterState();
     fs.writeFileSync(output+'.adaptation.png',(await win.webContents.capturePage()).toPNG());
     await win.webContents.executeJavaScript(`(()=>{
@@ -277,7 +285,7 @@ async function selfTest() {
     fixture.snapshot.limits=structuredClone(fixture.snapshot.limits);
     fixture.snapshot.limits.observedAt=Date.now()+86400000;
     Object.assign(fixture.snapshot.limits.groups[0].windows[0],{usedPercent:83,remainingPercent:17});
-    await delay(2100);const protectedQuota=await quotaState();
+    await delay(5200);const protectedQuota=await quotaState();
     win.webContents.send(NATIVE_FROM_VIEW,{type:'mcp-notification',hostId:'local',method:'account/rateLimits/updated',params:nativeLimits(42,Math.floor(Date.now()/1000)-1)});
     await delay(150);
     await win.webContents.executeJavaScript(`document.querySelector('.cu-ring button').click()`);await delay(180);

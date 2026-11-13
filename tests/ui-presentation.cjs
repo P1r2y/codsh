@@ -178,7 +178,7 @@ async function numberPresentation(win, update) {
       const timer=setTimeout(()=>{
         observer.disconnect();const label=document.querySelector('[data-cu-live] .cu-metric-label');
         reject(new Error('数字递变没有完成：'+JSON.stringify({text:label?.textContent,target:label?.dataset.cuText,pending:!!label?.querySelector('[data-cu-tween]')})));
-      },6000);
+      },9000);
       const observer=new MutationObserver(()=>{
         const label=document.querySelector('[data-cu-live] .cu-metric-label');
         if(label?.dataset.cuText!=='当前 44.8 tok/s'||!label.querySelector('[data-cu-tween]'))return;

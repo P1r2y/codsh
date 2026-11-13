@@ -10,6 +10,14 @@ async function navigationPresentation(win, snapshots, delays, fixture) {
     return {thread:strip?.dataset.cuThread,text:strip?.textContent,mounted:!!active?.contains(strip),
       replies:active?.querySelectorAll('.cu-turn').length,errors:window.fixtureErrors};
   })()`);
+  const settledReplies=async thread=>{
+    let result;
+    for(let attempt=0;attempt<30;attempt++){
+      result=await state();if(result.thread===thread&&result.replies===2)return result;
+      await pause(100);
+    }
+    return result;
+  };
   await win.webContents.executeJavaScript(`(()=>{
     const style=document.createElement('style');style.textContent='.fixture-hidden{display:none!important}';document.head.append(style);
     const pane=document.createElement('section');pane.dataset.fixturePane='first';
@@ -29,6 +37,7 @@ async function navigationPresentation(win, snapshots, delays, fixture) {
   await pause(350);const switched=await state();
   await win.webContents.executeJavaScript(`window.fixtureSwitch('first')`);
   await pause(350);const returned=await state();
+  const returnedSettled=await settledReplies(first);
   // An unchanged response must still recover a detached strip on focus.
   await win.webContents.executeJavaScript(`document.querySelector('.cu-strip')?.remove();window.dispatchEvent(new Event('focus'))`);
   await pause(250);const unchanged=await state();
@@ -41,13 +50,14 @@ async function navigationPresentation(win, snapshots, delays, fixture) {
     const first=document.querySelector('[data-fixture-pane=first]'),second=document.querySelector('[data-fixture-pane=second]');
     second.style.display='none';second.classList.remove('fixture-hidden');first.style.display='none';second.style.display='';
   })()`);await pause(300);const styleSwitch=await state();
-  return {removed,switched,returned,unchanged,quick,settled,styleSwitch,checks:{
+  const styleSettled=await settledReplies(second);
+  return {removed,switched,returned,returnedSettled,unchanged,quick,settled,styleSwitch,styleSettled,checks:{
     removedStrip:removed.mounted&&removed.thread===first,
     cssNavigation:switched.mounted&&switched.thread===second&&switched.text.includes('73 步'),
-    cssReturn:returned.mounted&&returned.thread===first&&returned.replies===2,
+    cssReturn:returned.mounted&&returned.thread===first&&returnedSettled.replies===2,
     unchangedRemount:unchanged.mounted&&unchanged.thread===first,
     slowReadReturn:quick.mounted&&quick.thread===first&&!quick.text.includes('等待')&&settled.thread===first,
-    styleNavigation:styleSwitch.mounted&&styleSwitch.thread===second&&styleSwitch.replies===2,
+    styleNavigation:styleSwitch.mounted&&styleSwitch.thread===second&&styleSettled.replies===2,
     noErrors:[removed,switched,returned,unchanged,quick,settled].every(v=>v.errors.length===0)
   }};
 }

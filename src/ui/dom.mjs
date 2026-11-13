@@ -86,11 +86,11 @@ export class CodexDOM {
     const composer=this.composer();
     return {composer,id:this.thread(composer)};
   }
-  scan(snapshot, {composer,id} = this.context()) {
+  *scanReplies(snapshot, id) {
     const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map(turn => [turn.id, turn]));
-    const replies = new Map();
     const latest = new Map();
     for (const response of document.querySelectorAll('[data-response-annotation-conversation]')) {
+      yield null;
       if (normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id) continue;
       let root = response.closest('[data-content-search-turn-key]');
       let key = null;
@@ -100,14 +100,14 @@ export class CodexDOM {
       latest.set(key, {turn, response, root});
     }
     for (const [key, {turn, response, root}] of latest) {
+      if(!response.isConnected||normalizeThreadId(response.getAttribute('data-response-annotation-conversation'))!==id)continue;
       const actions = [...response.querySelectorAll('.turn-action-controls')].filter(visible).at(-1) ??
         [...root.querySelectorAll('.turn-action-controls')].filter(node => visible(node) &&
           !node.closest('[data-response-annotation-conversation]') &&
           Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
       // 同一轮只保留最后一条原生回复的操作栏；操作栏稍后出现时会移动同一个统计节点。
-      replies.set(key, { turn, parent: actions ?? response, inline: Boolean(actions) });
+      yield [key, { turn, parent: actions ?? response, inline: Boolean(actions) }];
     }
-    return { id, composer, chat: this.chatMode(composer), replies, quota: this.quotaMount() };
   }
   quotaMount() {
     const rail = [...document.querySelectorAll('[data-app-navigation-rail]')].find(visible);

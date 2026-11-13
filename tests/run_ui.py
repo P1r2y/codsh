@@ -34,7 +34,7 @@ def run(source, output):
     with output.with_suffix('.log').open('wb') as log:
         process = subprocess.Popen([str(runtime/'ChatGPT.exe'), '--user-data-dir='+str(workspace/'profile')],
             env=environment, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
-        try: process.wait(timeout=120)
+        try: process.wait(timeout=180)
         except subprocess.TimeoutExpired:
             process.kill()
             raise RuntimeError('界面测试超时；仅停止独立测试进程')
