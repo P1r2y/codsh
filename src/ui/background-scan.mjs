@@ -15,6 +15,11 @@ export class BackgroundScan {
   plan(delay) {
     this.timer=setTimeout(()=>{
       this.timer=null;
+      // On navigation, start the newest few rows before waiting for an idle callback.
+      if (this.lastStarted === -Infinity) {
+        this.run({didTimeout:false,timeRemaining:()=>this.budgetMs});
+        return;
+      }
       this.idle=this.requestIdle(deadline=>{this.idle=null;this.run(deadline);},{timeout:500});
     },delay);
   }

@@ -92,14 +92,13 @@ export class CodexDOM {
     const seen = new Set();
     const responses = document.querySelectorAll(`[data-response-annotation-conversation="${id}" i]`);
     for (let i=responses.length-1;i>=0;i--) {
-      yield null;
       const response=responses[i];
-      if (!response.isConnected || normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id) continue;
+      if (!response.isConnected || normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id) {yield null;continue;}
       let root = response.closest('[data-content-search-turn-key]');
       let key = null;
       while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest('[data-content-search-turn-key]');
       const turn = turns.get(key);
-      if (!turn?.completed || seen.has(key) || !visible(response)) continue;
+      if (!turn?.completed || seen.has(key) || !visible(response)) {yield null;continue;}
       seen.add(key);
       const actions = [...response.querySelectorAll('.turn-action-controls')].filter(visible).at(-1) ??
         [...root.querySelectorAll('.turn-action-controls')].filter(node => visible(node) &&

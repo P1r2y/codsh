@@ -1,4 +1,4 @@
-// codsh-source-sha256:5b245ae2e7a4262fedc35b35c2fb1d492bbc9089b75a6d1f04d397f88edfe8fc
+// codsh-source-sha256:c7e734b8882bd9cc546160925660396894cca724431f74a757b54fc10f227f50
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -193,6 +193,10 @@
     plan(delay) {
       this.timer = setTimeout(() => {
         this.timer = null;
+        if (this.lastStarted === -Infinity) {
+          this.run({ didTimeout: false, timeRemaining: () => this.budgetMs });
+          return;
+        }
         this.idle = this.requestIdle((deadline) => {
           this.idle = null;
           this.run(deadline);
@@ -465,14 +469,19 @@
       const seen = /* @__PURE__ */ new Set();
       const responses = document.querySelectorAll(`[data-response-annotation-conversation="${id}" i]`);
       for (let i = responses.length - 1; i >= 0; i--) {
-        yield null;
         const response = responses[i];
-        if (!response.isConnected || normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) continue;
+        if (!response.isConnected || normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) {
+          yield null;
+          continue;
+        }
         let root = response.closest("[data-content-search-turn-key]");
         let key = null;
         while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest("[data-content-search-turn-key]");
         const turn = turns.get(key);
-        if (!turn?.completed || seen.has(key) || !visible(response)) continue;
+        if (!turn?.completed || seen.has(key) || !visible(response)) {
+          yield null;
+          continue;
+        }
         seen.add(key);
         const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1) ?? [...root.querySelectorAll(".turn-action-controls")].filter((node) => visible(node) && !node.closest("[data-response-annotation-conversation]") && Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
         yield [key, { turn, parent: actions ?? response, inline: Boolean(actions) }];
@@ -1462,7 +1471,7 @@
       if (!this.dom.chatMode(composer)) this.dom.alignComposer(composer, true);
       this.strip.align();
       this.realignReplies = true;
-      this.replyScan.request(() => this.renderReplies());
+      if (this.controller.snapshot?.available) this.replyScan.request(() => this.renderReplies());
       this.details.position();
       this.quota.position();
     }

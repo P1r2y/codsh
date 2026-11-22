@@ -160,7 +160,7 @@ export class UsagePlugin {
     if (!this.dom.chatMode(composer)) this.dom.alignComposer(composer, true);
     this.strip.align();
     this.realignReplies=true;
-    this.replyScan.request(()=>this.renderReplies());
+    if(this.controller.snapshot?.available)this.replyScan.request(()=>this.renderReplies());
     this.details.position();
     this.quota.position();
   }
