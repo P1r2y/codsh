@@ -1,12 +1,8 @@
 'use strict';
-const path = require('node:path');
 const {parentPort,workerData} = require('node:worker_threads');
 const {RolloutStore} = require('./rollout-store.cjs');
-const {AgentSpeed} = require('./agent-speed.cjs');
 
-const database = workerData?.database ?? (process.env.LOCALAPPDATA &&
-  path.join(process.env.LOCALAPPDATA,'AgentSpeed','history.sqlite'));
-const store = new RolloutStore(workerData?.home, new AgentSpeed(database));
+const store = new RolloutStore(workerData?.home);
 const reading = new Map();
 
 parentPort.on('message', ({id,data}) => {

@@ -1,4 +1,4 @@
-// codsh-source-sha256:c7e734b8882bd9cc546160925660396894cca724431f74a757b54fc10f227f50
+// codsh-source-sha256:d8160a38a6e3b5270d64b880fb7b5d255b07571c3bc5f6c31dad9b704963a334
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -527,18 +527,31 @@
         this.footers.delete(footer);
       }
     }
-    relevant(records) {
-      return records.some((record) => {
-        const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
-        if (target?.closest(OWN)) return false;
-        if (record.type === "attributes") {
-          return !["hidden", "aria-hidden", "inert"].includes(record.attributeName) || structural(target);
-        }
-        const nodes = [...record.addedNodes, ...record.removedNodes];
-        if ([...record.removedNodes].some((node) => node.nodeType === 1 && node.matches(".cu-strip,.cu-turn") && !node.isConnected)) return true;
-        if (nodes.some(structural)) return true;
-        return target?.matches("[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]") && nodes.some((node) => node.nodeType === 1 && !node.matches(OWN));
-      });
+    remountActions(record, threadId, replies) {
+      if (record.removedNodes.length !== 1 || record.addedNodes.length !== 1) return false;
+      const old = record.removedNodes[0], row = record.addedNodes[0];
+      if (!this.actions.has(old) || old.isConnected || !row.matches?.(".turn-action-controls")) return false;
+      const response = row.closest("[data-response-annotation-conversation]");
+      if (!response || normalizeThreadId(response.dataset.responseAnnotationConversation) !== threadId) return false;
+      const root = response.closest("[data-content-search-turn-key]");
+      const group = root && replies.get(turnId(root, replies));
+      if (!group || group.node.parentElement !== old || row.querySelector(".cu-turn") || !visible(row)) return false;
+      this.actions.delete(old);
+      old.classList.remove("cu-action-row");
+      this.markActions(row);
+      group.mount(row);
+      return true;
+    }
+    relevant(record) {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      if (target?.closest(OWN)) return false;
+      if (record.type === "attributes") {
+        return !["hidden", "aria-hidden", "inert"].includes(record.attributeName) || structural(target);
+      }
+      const nodes = [...record.addedNodes, ...record.removedNodes];
+      if ([...record.removedNodes].some((node) => node.nodeType === 1 && node.matches(".cu-strip,.cu-turn") && !node.isConnected)) return true;
+      if (nodes.some(structural)) return true;
+      return target?.matches("[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]") && nodes.some((node) => node.nodeType === 1 && !node.matches(OWN));
     }
     dispose() {
       this.visibilityObserver?.disconnect();
@@ -1010,7 +1023,6 @@
         const statistics = statisticsFor(turns), generated = statistics.generatedMs, duration = statistics.durationMs;
         const firstTokens = turns.map((t) => t.timeToFirstTokenMs).filter((n) => n != null);
         const generation = statistics.estimatedGenerationTps != null;
-        const measured = kind === "session" && !id ? snapshot.agentSpeedTps : null;
         nodes.push(
           panelHeader(kind === "live" ? "\u5F53\u524D\u6267\u884C" : turn ? "\u672C\u8F6E\u7EDF\u8BA1" : "\u4F1A\u8BDD\u7EDF\u8BA1", "speed"),
           statRow(active ? "\u72B6\u6001" : "\u5BF9\u8BDD\u8F6E\u6570", active ? active.status : `${snapshot.turnCount} \u8F6E`),
@@ -1019,7 +1031,7 @@
           statRow("\u6574\u8F6E\u8017\u65F6", duration != null ? elapsed(duration) : null),
           statRow("\u5DE5\u5177\u8C03\u7528", `${turns.reduce((n, t) => n + t.tools, 0)} \u6B21`),
           statRow(active ? "\u9996 token \u7B49\u5F85\uFF08TTFT\uFF09" : "\u6BCF\u8F6E\u9996 token \u5E73\u5747", firstTokens.length ? elapsed(firstTokens.reduce((a, b) => a + b, 0) / firstTokens.length) : null),
-          measured != null ? statRow("\u5DF2\u8BA1\u65F6\u901F\u5EA6\uFF08Agent Speed\uFF09", `${Math.round(measured)} tok/s`) : statRow(kind === "live" ? "\u5F53\u524D\u6574\u8F6E\u5E73\u5747" : generation ? "\u751F\u6210\u901F\u5EA6\uFF08\u4F30\u7B97\uFF09" : "\u6574\u8F6E\u5E73\u5747\u901F\u5EA6", kind === "live" ? `${statistics.averageTps?.toFixed(1) ?? "\u2014"} tok/s` : speedLabel(statistics).replace(/^整轮 /, ""))
+          statRow(kind === "live" ? "\u5F53\u524D\u6574\u8F6E\u5E73\u5747" : generation ? "\u751F\u6210\u901F\u5EA6\uFF08\u4F30\u7B97\uFF09" : "\u6574\u8F6E\u5E73\u5747\u901F\u5EA6", kind === "live" ? `${statistics.averageTps?.toFixed(1) ?? "\u2014"} tok/s` : speedLabel(statistics).replace(/^整轮 /, ""))
         );
       }
       if (completedDate(turn)) nodes.push(statRow(turn?.endInferred ? "\u6700\u540E\u8BB0\u5F55\u65F6\u95F4" : "\u5B8C\u6210\u65F6\u95F4", completedDate(turn)));
@@ -1377,7 +1389,7 @@
         return;
       }
       const items = [
-        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${snapshot.agentSpeedTps != null ? Math.round(snapshot.agentSpeedTps) + " tok/s" : speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? []))}` },
+        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? []))}` },
         { key: "tokens", icon: "token", kind: "tokens", text: `${fmt(snapshot.total.total_tokens)} tok \xB7 \u7F13\u5B58\u547D\u4E2D ${pct(snapshot.cacheHitPercent)}` },
         { key: "context", icon: "context", kind: "context", text: pct(snapshot.contextPercent) }
       ];
@@ -1494,7 +1506,13 @@
       };
       this.dom.watchVisibility(() => reconcile(true));
       const observer = new MutationObserver((records) => {
-        if (this.dom.relevant(records)) reconcile(records.some((record) => record.type === "attributes"));
+        if (document.visibilityState === "hidden") return;
+        let needsRender = false;
+        for (const record of records) {
+          if (this.dom.remountActions(record, this.controller.threadId, this.replies)) continue;
+          needsRender ||= this.dom.relevant(record);
+        }
+        if (needsRender) reconcile(records.some((record) => record.type === "attributes"));
       });
       observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: [
         "data-above-composer-conversation-id",

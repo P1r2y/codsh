@@ -109,6 +109,9 @@ class InstallerTests(unittest.TestCase):
             settings = destination/'plugins.json'
             original = {'loaderVersion':1, 'plugins':{'codex-usage':{'enabled':False}, 'other':{'enabled':True}}, 'extra':7}
             settings.write_text(json.dumps(original))
+            obsolete = destination/'plugins/codex-usage/lib/agent-speed.cjs'
+            obsolete.parent.mkdir(parents=True)
+            obsolete.write_text('previous release')
             # 写入真实构建与源码；这里只隔离图标来源，不启动客户端。
             install.install_plugin(destination/'source/app', destination)
             actual = json.loads(settings.read_text())
@@ -117,7 +120,8 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(actual['extra'], 7)
             self.assertEqual((destination/'plugins/codex-usage/lib/project-cache.cjs').read_bytes(),
                              (install.ROOT/'src/project-cache.cjs').read_bytes())
-            for name in ['project-cache-worker.cjs', 'log-watch.cjs', 'agent-speed.cjs', 'usage-worker.cjs', 'worker-client.cjs']:
+            self.assertFalse(obsolete.exists())
+            for name in ['project-cache-worker.cjs', 'log-watch.cjs', 'usage-worker.cjs', 'worker-client.cjs']:
                 self.assertEqual((destination/'plugins/codex-usage/lib'/name).read_bytes(),
                                  (install.ROOT/'src'/name).read_bytes())
 

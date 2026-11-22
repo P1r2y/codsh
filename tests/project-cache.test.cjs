@@ -6,6 +6,7 @@ const fsp = fs.promises;
 const path = require('node:path');
 const os = require('node:os');
 const {RolloutStore} = require('../src/rollout-store.cjs');
+const {WorkerClient} = require('../src/worker-client.cjs');
 const {CACHE_NAME,ProjectCache} = require('../src/project-cache.cjs');
 
 const id = '00000000-0000-4000-8000-000000000001';
@@ -179,4 +180,67 @@ test('备用额度检查不重复打开未变化日志，并合并并发请求',
   store.lastQuotaCheck=0;await store.read(null);assert.equal(opens,initial);
   fs.appendFileSync(fixture.filename,'\n');store.lastQuotaCheck=0;
   await store.read(null);assert.equal(opens,initial+1);
+});
+
+test('UUIDv7 定位只枚举创建日，后台线程独立读取并复用统计', async t => {
+  const hex = Date.parse(timestamp).toString(16).padStart(12, '0');
+  const thread = hex.slice(0, 8) + '-' + hex.slice(8) + '-7000-8000-000000000001';
+  const fixture = setup(t, thread);
+  const store = new RolloutStore(fixture.home);
+  const directories = [];
+  const readdir = fsp.readdir.bind(fsp);
+  t.mock.method(fsp, 'readdir', async (dir, options) => {
+    directories.push(dir);
+    return readdir(dir, options);
+  });
+  assert.equal(await store.find(thread), fixture.filename);
+  assert.ok(directories.length >= 1 && directories.length <= 2);
+  assert.ok(directories.every(dir => /^\d{4}[\\/]\d{2}[\\/]\d{2}$/.test(path.relative(path.join(fixture.home, 'sessions'), dir))));
+  const before = directories.length;
+  assert.equal(await store.find(thread), fixture.filename);
+  assert.equal(directories.length, before);
+  const reader = new WorkerClient(path.join(__dirname, '../src/usage-worker.cjs'), {home:fixture.home});
+  try {
+    const {snapshot, filename} = await reader.request('read', {threadId:thread});
+    assert.equal(filename, fixture.filename);
+    assert.equal(snapshot.total.total_tokens, 120);
+    assert.equal(snapshot.turns[0].averageTps, 20 * 1000 / 3000);
+    const next = await reader.request('read', {threadId:thread, knownRevision:snapshot.revision});
+    assert.equal(next.snapshot.unchanged, true);
+  } finally { await reader.dispose(); }
+});
+
+test('跨块长记录只拼接一次，跳过大段正文，缓存停在完整行末', async t => {
+  const fixture = setup(t);
+  const store = new RolloutStore(fixture.home);
+  t.after(() => store.projectCache.dispose());
+  const original = await store.read(id);
+  const body = 'x'.repeat(2 * 1024 * 1024);
+  const ignored = line(event('response_item', {content:body}));
+  const record = Buffer.from(line(event('token_usage_record', {
+    turn_id:'one', response_id:'long', usage:tokens(40, 5), note:body + '中文'
+  })));
+  const split = record.indexOf(Buffer.from('中')) + 1;
+  const complete = fs.statSync(fixture.filename).size + Buffer.byteLength(ignored);
+  const concat = Buffer.concat;
+  const copies = [];
+  t.mock.method(Buffer, 'concat', (parts, length) => {
+    const result = concat(parts, length);
+    if (result.length >= 256 * 1024) copies.push(result.length);
+    return result;
+  });
+  // Split the type header across appends as can happen while the log is being written.
+  const midHeader = ignored.indexOf('response_item') + 3;
+  fs.appendFileSync(fixture.filename, ignored.slice(0, midHeader));
+  await store.read(id, {knownRevision:original.revision});
+  fs.appendFileSync(fixture.filename, ignored.slice(midHeader));
+  fs.appendFileSync(fixture.filename, record.subarray(0, split));
+  assert.equal((await store.read(id, {knownRevision:original.revision})).unchanged, true);
+  await store.projectCache.flush();
+  assert.equal(JSON.parse(fs.readFileSync(fixture.cache)).sessions[id].offset, complete);
+  assert.deepEqual(copies, []);
+  fs.appendFileSync(fixture.filename, record.subarray(split));
+  const updated = await store.read(id);
+  assert.equal(updated.total.total_tokens, 165);
+  assert.deepEqual(copies, [record.length - 1]);
 });

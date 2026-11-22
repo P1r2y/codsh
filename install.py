@@ -318,8 +318,9 @@ def prepare_runtime(source, destination, original_hash):
 
 def install_plugin(source, destination):
     plugin = destination/'plugins/codex-usage'
-    for file in ['worker-client.cjs', 'agent-speed.cjs', 'usage-worker.cjs', 'usage-model.cjs', 'quota-model.cjs', 'usage-data.cjs', 'project-cache.cjs', 'project-cache-worker.cjs', 'log-watch.cjs', 'rollout-store.cjs', 'protocol.cjs', 'usage-host.cjs']:
+    for file in ['worker-client.cjs', 'usage-worker.cjs', 'usage-model.cjs', 'quota-model.cjs', 'usage-data.cjs', 'project-cache.cjs', 'project-cache-worker.cjs', 'log-watch.cjs', 'rollout-store.cjs', 'protocol.cjs', 'usage-host.cjs']:
         write_atomic(plugin/'lib'/file, (ROOT/'src'/file).read_bytes())
+    (plugin/'lib/agent-speed.cjs').unlink(missing_ok=True)
     # 提交完整前端后再更新清单，加载器按摘要切换版本。
     write_atomic(plugin/'ui/usage-preload.cjs', (ROOT/'dist/usage-preload.cjs').read_bytes())
     write_atomic(plugin/'plugin.json', (ROOT/'plugin/plugin.json').read_bytes())

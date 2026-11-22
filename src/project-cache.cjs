@@ -72,7 +72,7 @@ class ProjectCache {
         // postMessage snapshots this turn state before another log read can mutate it.
         const {size,mtimeMs,birthtimeMs}=item.stat;
         await this.request('write',{cwd:item.cwd,id:item.id,filename:item.filename,size,mtimeMs,birthtimeMs,
-          offset:item.position-item.pending.length,state:item.acc.toCache()});
+          offset:item.completeOffset,state:item.acc.toCache()});
       } catch { /* A failed cache never prevents live statistics. */ }
     }
   }

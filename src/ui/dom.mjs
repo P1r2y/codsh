@@ -151,21 +151,33 @@ export class CodexDOM {
       this.footers.delete(footer);
     }
   }
-  relevant(records) {
-    return records.some(record => {
-      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
-      if (target?.closest(OWN)) return false;
-      if (record.type === 'attributes') {
-        return !['hidden','aria-hidden','inert'].includes(record.attributeName) || structural(target);
-      }
-      const nodes=[...record.addedNodes,...record.removedNodes];
-      // React may remove an injected row without changing any native marker.
-      if([...record.removedNodes].some(node=>node.nodeType===1&&node.matches('.cu-strip,.cu-turn')&&!node.isConnected))return true;
-      if(nodes.some(structural))return true;
-      // Reconcile native siblings of the strip without depending on periodic scans.
-      return target?.matches('[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]')&&
-        nodes.some(node=>node.nodeType===1&&!node.matches(OWN));
-    });
+  remountActions(record, threadId, replies) {
+    if (record.removedNodes.length !== 1 || record.addedNodes.length !== 1) return false;
+    const old = record.removedNodes[0], row = record.addedNodes[0];
+    if (!this.actions.has(old) || old.isConnected || !row.matches?.('.turn-action-controls')) return false;
+    const response = row.closest('[data-response-annotation-conversation]');
+    if (!response || normalizeThreadId(response.dataset.responseAnnotationConversation) !== threadId) return false;
+    const root = response.closest('[data-content-search-turn-key]');
+    const group = root && replies.get(turnId(root, replies));
+    if (!group || group.node.parentElement !== old || row.querySelector('.cu-turn') || !visible(row)) return false;
+    this.actions.delete(old);
+    old.classList.remove('cu-action-row');
+    this.markActions(row);
+    group.mount(row);
+    return true;
+  }
+  relevant(record) {
+    const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+    if (target?.closest(OWN)) return false;
+    if (record.type === 'attributes') {
+      return !['hidden','aria-hidden','inert'].includes(record.attributeName) || structural(target);
+    }
+    const nodes=[...record.addedNodes,...record.removedNodes];
+    // React may remove an injected row without changing any native marker.
+    if([...record.removedNodes].some(node=>node.nodeType===1&&node.matches('.cu-strip,.cu-turn')&&!node.isConnected))return true;
+    if(nodes.some(structural))return true;
+    return target?.matches('[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]')&&
+      nodes.some(node=>node.nodeType===1&&!node.matches(OWN));
   }
   dispose() {
     this.visibilityObserver?.disconnect();

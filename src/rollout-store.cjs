@@ -8,10 +8,73 @@ const { UsageAccumulator, normalizeLimits } = require('./usage-data.cjs');
 const { ProjectCache, projectFromLog } = require('./project-cache.cjs');
 const { UUID } = require('./protocol.cjs');
 
+// Codex normally files UUIDv7 sessions under their local creation date.
+async function findDatedLog(home, id) {
+  if (id[14] !== '7') return;
+  const created = new Date(parseInt(id.slice(0, 8) + id.slice(9, 13), 16));
+  const localDay = [created.getFullYear(), String(created.getMonth() + 1).padStart(2, '0'),
+    String(created.getDate()).padStart(2, '0')].join('-');
+  const suffix = '-' + id + '.jsonl';
+  const sessions = path.join(home, 'sessions');
+  let root;
+  try { root = await fsp.realpath(sessions); } catch { return; }
+  for (const day of new Set([localDay, created.toISOString().slice(0, 10)])) {
+    const datePath = path.join(...day.split('-'));
+    const dir = path.join(sessions, datePath);
+    try {
+      if (path.relative(root, await fsp.realpath(dir)) !== datePath) continue;
+      const entries = await fsp.readdir(dir, {withFileTypes:true});
+      const file = entries.find(entry => entry.isFile() && entry.name.toLowerCase().endsWith(suffix));
+      if (file) return path.join(dir, file.name);
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') break;
+    }
+  }
+}
+
+function feedLine(item, bytes) {
+  const line = bytes.toString('utf8');
+  if (!/"type"\s*:\s*"(?:token_usage_record|event_msg|turn_context|session_meta)"/.test(line)) return false;
+  try {
+    const event = JSON.parse(line);
+    item.acc.feed(event);
+    return event.type === 'turn_context' || event.type === 'token_usage_record' ||
+      event.type === 'event_msg' && ['task_started','token_count','item_completed',
+        'task_complete','turn_aborted','task_aborted'].includes(event.payload?.type);
+  } catch { return false; }
+}
+
+// A large response body can contain many MiB of tool output or image data.
+// Only skip when the beginning identifies the top-level record unambiguously.
+const responseHeader = /^\s*\{\s*(?:"timestamp"\s*:\s*"[0-9TZ:.+\-]+"\s*,\s*)?"type"\s*:\s*"response_item"\s*[,}]/;
+
+function consumePart(item, part, complete, previousBytes) {
+  if (!item.skipping && previousBytes < 192 && (!complete || part.length >= 4096)) {
+    const prefix = item.parts.map(bytes => bytes.toString('latin1')).join('') +
+      part.toString('latin1', 0, 192 - previousBytes);
+    if (responseHeader.test(prefix)) {
+      item.parts.length = 0;
+      item.skipping = true;
+    }
+  }
+  if (item.skipping) {
+    item.skipping = !complete;
+    return false;
+  }
+  if (!complete) {
+    item.parts.push(part.byteOffset ? Buffer.from(part) : part);
+    return false;
+  }
+  if (!item.parts.length) return feedLine(item, part);
+  item.parts.push(part);
+  const line = Buffer.concat(item.parts);
+  item.parts.length = 0;
+  return feedLine(item, line);
+}
+
 class RolloutStore {
-  constructor(home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), agentSpeed = null) {
+  constructor(home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex')) {
     this.home = home;
-    this.agentSpeed = agentSpeed;
     this.files = new Map();
     this.cache = new Map();
     this.lastIndex = 0;
@@ -50,23 +113,19 @@ class RolloutStore {
   }
   async find(id) {
     if (this.files.has(id)) return this.files.get(id);
-    if (!this.lastIndex && this.agentSpeed) {
-      const indexed = this.agentSpeed.find(this.home,id);
-      if (indexed) {
-        this.files.set(id,indexed);
-        return indexed;
-      }
+    const lastMiss = this.misses.get(id);
+    if (lastMiss !== undefined && Date.now() - lastMiss < 1500) return;
+    const dated = await findDatedLog(this.home, id);
+    if (dated) {
+      this.files.set(id, dated);
+      this.misses.delete(id);
+      return dated;
     }
-    const alreadyIndexed = Boolean(this.lastIndex);
-    await this.index();
+    if (lastMiss !== undefined && Date.now() - lastMiss < 30000) return;
+    await this.index(Boolean(this.lastIndex));
     if (this.files.has(id)) return this.files.get(id);
-    const now = Date.now();
-    if (alreadyIndexed && now - (this.misses.get(id) ?? 0) >= 30000) {
-      this.misses.set(id, now);
-      await this.index(true);
-    } else if (!this.misses.has(id)) this.misses.set(id, now);
+    this.misses.set(id, Date.now());
     while (this.misses.size > 100) this.misses.delete(this.misses.keys().next().value);
-    return this.files.get(id);
   }
   async read(id, options = {}) {
     if (id !== null && (typeof id !== 'string' || !UUID.test(id))) throw new Error('会话 ID 无效');
@@ -131,14 +190,14 @@ class RolloutStore {
       item = null;
     }
     if (!item) {
-      item = {id, filename, position:0, pending:Buffer.alloc(0), acc:new UsageAccumulator(),
+      item = {id, filename, position:0, completeOffset:0, parts:[], skipping:false, acc:new UsageAccumulator(),
         cwd:null, stat:null, reading:null, snapshot:null, snapshotVersion:-1,
         key:crypto.randomBytes(8).toString('hex'), stateVersion:0};
       this.cache.set(id, item);
       item.ready = (async () => {
         item.cwd = await projectFromLog(filename, this.home);
         const restored = await this.projectCache.restore(item.cwd, id, filename, stat);
-        if (restored) { item.position = restored.offset; item.acc = restored.acc; }
+        if (restored) { item.position = item.completeOffset = restored.offset; item.acc = restored.acc; }
       })();
       await item.ready;
     }
@@ -155,14 +214,7 @@ class RolloutStore {
     const live = item.acc.turns.get(item.acc.currentId);
     const isLive = Boolean(live && !live.completed);
     const limits = this.latestLimits ?? item.acc.limits;
-    if (this.agentSpeed && (item.speedSize !== stat.size || item.speedMtime !== stat.mtimeMs ||
-        Date.now() >= item.speedExpires || item.speedExpires === undefined)) {
-      item.agentSpeedTps = this.agentSpeed.measuredSpeed(filename,stat);
-      item.speedSize = stat.size;
-      item.speedMtime = stat.mtimeMs;
-      item.speedExpires = Date.now() + 30000;
-    }
-    const revision = `${item.key}:${item.stateVersion}:${limits?.observedAt ?? ''}:${item.agentSpeedTps ?? ''}`;
+    const revision = `${item.key}:${item.stateVersion}:${limits?.observedAt ?? ''}`;
     if (options.knownRevision === revision) {
       const durationMs = isLive && Number.isFinite(live.start) ? Math.max(0, Date.now() - live.start) : null;
       const liveTick = isLive ? {id:live.id, durationMs,
@@ -173,7 +225,7 @@ class RolloutStore {
       item.snapshot = item.acc.snapshot();
       item.snapshotVersion = item.stateVersion;
     }
-    return {...item.snapshot, threadId:id, limits, updatedAt:stat.mtimeMs, revision, agentSpeedTps:item.agentSpeedTps ?? null};
+    return {...item.snapshot, threadId:id, limits, updatedAt:stat.mtimeMs, revision};
   }
   async update(item, size) {
     if (item.position === size) return false;
@@ -186,22 +238,16 @@ class RolloutStore {
         if (!bytesRead) break;
         item.position += bytesRead;
         const chunk = bytes.subarray(0, bytesRead);
-        const data = item.pending.length ? Buffer.concat([item.pending, chunk]) : chunk;
-        let start = 0, end;
-        while ((end = data.indexOf(10, start)) !== -1) {
-          const line = data.subarray(start, end).toString('utf8');
+        const offset = item.position - bytesRead;
+        let start = 0;
+        while (start < bytesRead) {
+          const end = chunk.indexOf(10, start);
+          const part = chunk.subarray(start, end < 0 ? bytesRead : end);
+          if (consumePart(item, part, end >= 0, offset + start - item.completeOffset)) changed = true;
+          if (end < 0) break;
           start = end + 1;
-          // Only usage and timing events are parsed; conversation content is never cached.
-          if (!/"type"\s*:\s*"(?:token_usage_record|event_msg|turn_context|session_meta)"/.test(line)) continue;
-          try {
-            const event = JSON.parse(line);
-            item.acc.feed(event);
-            if (event.type === 'turn_context' || event.type === 'token_usage_record' ||
-                event.type === 'event_msg' && ['task_started','token_count','item_completed',
-                  'task_complete','turn_aborted','task_aborted'].includes(event.payload?.type)) changed = true;
-          } catch {}
+          item.completeOffset = offset + start;
         }
-        item.pending = Buffer.from(data.subarray(start));
         await new Promise(resolve => setImmediate(resolve));
       }
     } finally { await handle.close(); }

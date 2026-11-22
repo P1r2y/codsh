@@ -79,7 +79,7 @@ export class UsagePlugin {
       return;
     }
     const items = [
-      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${snapshot.agentSpeedTps != null ? Math.round(snapshot.agentSpeedTps)+' tok/s' : speedLabel(usageModel.statisticsFor(snapshot.turns ?? []))}`},
+      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${speedLabel(usageModel.statisticsFor(snapshot.turns ?? []))}`},
       {key:'tokens',icon:'token',kind:'tokens',text:`${fmt(snapshot.total.total_tokens)} tok · 缓存命中 ${pct(snapshot.cacheHitPercent)}`},
       {key:'context',icon:'context',kind:'context',text:pct(snapshot.contextPercent)}
     ];
@@ -183,7 +183,13 @@ export class UsagePlugin {
     };
     this.dom.watchVisibility(()=>reconcile(true));
     const observer = new MutationObserver(records => {
-      if(this.dom.relevant(records))reconcile(records.some(record=>record.type==='attributes'));
+      if (document.visibilityState === 'hidden') return;
+      let needsRender = false;
+      for (const record of records) {
+        if (this.dom.remountActions(record, this.controller.threadId, this.replies)) continue;
+        needsRender ||= this.dom.relevant(record);
+      }
+      if (needsRender) reconcile(records.some(record => record.type === 'attributes'));
     });
     observer.observe(document.body, {childList:true,subtree:true,attributes:true,attributeFilter:[
       'data-above-composer-conversation-id','data-content-search-turn-key',

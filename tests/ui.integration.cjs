@@ -37,26 +37,6 @@ async function selfTest() {
     const workerState=await backgroundCache.request('stats');
     await backgroundCache.dispose();
     const fixture = JSON.parse(fs.readFileSync(path.join(__dirname,'fixture.json'),'utf8'));
-    if(process.env.CODEX_USAGE_UI_TEST_CASE==='agent-speed') {
-      const home=app.getPath('userData'),directory=path.join(home,'sessions');
-      fs.mkdirSync(directory,{recursive:true});
-      const id=fixture.snapshot.threadId,filename=path.join(directory,'rollout-test-'+id+'.jsonl');
-      fs.writeFileSync(filename,JSON.stringify({type:'token_usage_record',payload:{turn_id:'first',response_id:'one',
-        usage:{input_tokens:200,output_tokens:70,total_tokens:270}}})+'\n');
-      const database=path.join(home,'test-speed.sqlite'),stat=fs.statSync(filename);
-      const db=new (require('node:sqlite').DatabaseSync)(database);
-      db.exec('CREATE TABLE files(id INTEGER PRIMARY KEY,path TEXT UNIQUE,family TEXT,size INTEGER,modified INTEGER);'+
-        'CREATE TABLE contributions(file_id INTEGER,source TEXT,measured_output INTEGER,measured_ms INTEGER);');
-      db.prepare("INSERT INTO files VALUES(1,?,'Codex',?,?)").run(filename,stat.size,621355968000000000n+BigInt(Math.floor(stat.mtimeMs))*10000n);
-      db.exec("INSERT INTO contributions VALUES(1,'codex',70,2000)");db.close();
-      const {WorkerClient}=require('../src/worker-client.cjs');
-      const worker=new WorkerClient(path.join(__dirname,'../src/usage-worker.cjs'),{home,database});
-      try {
-        const {snapshot}=await worker.request('read',{threadId:id});
-        if(snapshot.agentSpeedTps!==35)throw new Error('Electron worker did not read Agent Speed data');
-        fixture.snapshot.agentSpeedTps=snapshot.agentSpeedTps;
-      } finally {await worker.dispose();}
-    }
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='navigation')fixture.snapshot.revision='nav-first';
     // Synthetic speed samples use explicit durations rather than the wall clock.
     fixture.snapshot.turns.forEach(turn=>{turn.startedAt=null;});
@@ -101,16 +81,6 @@ async function selfTest() {
     },100);publishing.unref();
     await win.loadFile(path.join(__dirname,'fixture.html'));
     await new Promise(resolve=>setTimeout(resolve,2200));
-    if(process.env.CODEX_USAGE_UI_TEST_CASE==='agent-speed') {
-      const checks=await win.webContents.executeJavaScript(`(()=>{
-        const button=document.querySelector('.cu-strip [data-cu-kind=session]');
-        button.click();
-        const session=button.textContent.includes('35 tok/s')&&document.querySelector('.cu-panel').textContent.includes('Agent Speed');
-        const turn=document.querySelector('.cu-turn [data-cu-kind=session]');turn.click();
-        return {session,turn:!turn.textContent.includes('35 tok/s')&&!document.querySelector('.cu-panel').textContent.includes('Agent Speed')};
-      })()`);
-      write({ok:Object.values(checks).every(Boolean),checks});win.destroy();app.exit(0);return;
-    }
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='pacing') {
       const report=await pacingPresentation(win,fixture.snapshot,readTimes);
       write({ok:Object.values(report.checks).every(Boolean),...report});win.destroy();app.exit(0);return;
@@ -268,7 +238,7 @@ async function selfTest() {
     await delay(5200);const switched=await navigationState();
     fs.writeFileSync(output+'.navigation.png',(await win.webContents.capturePage()).toPNG());
     await win.webContents.executeJavaScript(`(()=>{const row=document.querySelector('main[data-fixture-view=second] .turn-action-controls'),next=row.cloneNode(true);next.querySelectorAll('.cu-turn').forEach(e=>e.remove());row.replaceWith(next);})()`);
-    await delay(1600);const replacedActions=await navigationState();
+    const replacedActions=await navigationState();
     await win.webContents.executeJavaScript(`window.fixtureNavigate(${JSON.stringify(fixture.snapshot.threadId)})`);await delay(250);const returned=await navigationState();
     let settledReturn=returned;
     for(let attempt=0;attempt<30&&settledReturn.visibleFooters!==2;attempt++){
