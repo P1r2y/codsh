@@ -79,7 +79,7 @@ export class UsagePlugin {
       return;
     }
     const items = [
-      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${speedLabel(usageModel.statisticsFor(snapshot.turns ?? []))}`},
+      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${snapshot.agentSpeedTps != null ? Math.round(snapshot.agentSpeedTps)+' tok/s' : speedLabel(usageModel.statisticsFor(snapshot.turns ?? []))}`},
       {key:'tokens',icon:'token',kind:'tokens',text:`${fmt(snapshot.total.total_tokens)} tok · 缓存命中 ${pct(snapshot.cacheHitPercent)}`},
       {key:'context',icon:'context',kind:'context',text:pct(snapshot.contextPercent)}
     ];

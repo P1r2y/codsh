@@ -88,19 +88,19 @@ export class CodexDOM {
   }
   *scanReplies(snapshot, id) {
     const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map(turn => [turn.id, turn]));
-    const latest = new Map();
-    for (const response of document.querySelectorAll('[data-response-annotation-conversation]')) {
+    if (!turns.size || !normalizeThreadId(id)) return;
+    const seen = new Set();
+    const responses = document.querySelectorAll(`[data-response-annotation-conversation="${id}" i]`);
+    for (let i=responses.length-1;i>=0;i--) {
       yield null;
-      if (normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id) continue;
+      const response=responses[i];
+      if (!response.isConnected || normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id) continue;
       let root = response.closest('[data-content-search-turn-key]');
       let key = null;
       while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest('[data-content-search-turn-key]');
       const turn = turns.get(key);
-      if (!turn?.completed || !visible(response)) continue;
-      latest.set(key, {turn, response, root});
-    }
-    for (const [key, {turn, response, root}] of latest) {
-      if(!response.isConnected||normalizeThreadId(response.getAttribute('data-response-annotation-conversation'))!==id)continue;
+      if (!turn?.completed || seen.has(key) || !visible(response)) continue;
+      seen.add(key);
       const actions = [...response.querySelectorAll('.turn-action-controls')].filter(visible).at(-1) ??
         [...root.querySelectorAll('.turn-action-controls')].filter(node => visible(node) &&
           !node.closest('[data-response-annotation-conversation]') &&

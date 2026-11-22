@@ -1,4 +1,4 @@
-// codsh-source-sha256:2478d0186e17ecb93a3407799ade22b4c0a9734f2208c901aee1b5504daeb6a6
+// codsh-source-sha256:5b245ae2e7a4262fedc35b35c2fb1d492bbc9089b75a6d1f04d397f88edfe8fc
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -461,19 +461,19 @@
     }
     *scanReplies(snapshot, id) {
       const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map((turn) => [turn.id, turn]));
-      const latest = /* @__PURE__ */ new Map();
-      for (const response of document.querySelectorAll("[data-response-annotation-conversation]")) {
+      if (!turns.size || !normalizeThreadId(id)) return;
+      const seen = /* @__PURE__ */ new Set();
+      const responses = document.querySelectorAll(`[data-response-annotation-conversation="${id}" i]`);
+      for (let i = responses.length - 1; i >= 0; i--) {
         yield null;
-        if (normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) continue;
+        const response = responses[i];
+        if (!response.isConnected || normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) continue;
         let root = response.closest("[data-content-search-turn-key]");
         let key = null;
         while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest("[data-content-search-turn-key]");
         const turn = turns.get(key);
-        if (!turn?.completed || !visible(response)) continue;
-        latest.set(key, { turn, response, root });
-      }
-      for (const [key, { turn, response, root }] of latest) {
-        if (!response.isConnected || normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) continue;
+        if (!turn?.completed || seen.has(key) || !visible(response)) continue;
+        seen.add(key);
         const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1) ?? [...root.querySelectorAll(".turn-action-controls")].filter((node) => visible(node) && !node.closest("[data-response-annotation-conversation]") && Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
         yield [key, { turn, parent: actions ?? response, inline: Boolean(actions) }];
       }
@@ -893,7 +893,6 @@
   function createDetailsPopover(onOpen) {
     let snapshot = null;
     let metricPanel = null, panelAnchor = null, panelCloseTimer = null, tokenModel = null;
-    let byId = /* @__PURE__ */ new Map();
     function statRow(label, value) {
       const row = element("div", "cu-stat-row");
       row.append(element("span", "cu-stat-label", label), element("span", "cu-stat-value", value ?? "\u6682\u65E0\u6570\u636E"));
@@ -985,7 +984,7 @@
     }
     function buildMetricDetails(anchor) {
       const kind = anchor.dataset.cuKind, id = anchor.dataset.cuTurn;
-      const turn = id ? byId.get(id) : null, last = snapshot?.turns?.at(-1);
+      const turn = id ? snapshot?.turns?.find((turn2) => turn2.id === id) : null, last = snapshot?.turns?.at(-1);
       const nodes = [];
       if (!snapshot?.available) return [element("p", "cu-note", "\u6682\u65E0\u53EF\u7528\u7EDF\u8BA1\u6570\u636E")];
       if (kind === "tokens") {
@@ -1002,6 +1001,7 @@
         const statistics = statisticsFor(turns), generated = statistics.generatedMs, duration = statistics.durationMs;
         const firstTokens = turns.map((t) => t.timeToFirstTokenMs).filter((n) => n != null);
         const generation = statistics.estimatedGenerationTps != null;
+        const measured = kind === "session" && !id ? snapshot.agentSpeedTps : null;
         nodes.push(
           panelHeader(kind === "live" ? "\u5F53\u524D\u6267\u884C" : turn ? "\u672C\u8F6E\u7EDF\u8BA1" : "\u4F1A\u8BDD\u7EDF\u8BA1", "speed"),
           statRow(active ? "\u72B6\u6001" : "\u5BF9\u8BDD\u8F6E\u6570", active ? active.status : `${snapshot.turnCount} \u8F6E`),
@@ -1010,7 +1010,7 @@
           statRow("\u6574\u8F6E\u8017\u65F6", duration != null ? elapsed(duration) : null),
           statRow("\u5DE5\u5177\u8C03\u7528", `${turns.reduce((n, t) => n + t.tools, 0)} \u6B21`),
           statRow(active ? "\u9996 token \u7B49\u5F85\uFF08TTFT\uFF09" : "\u6BCF\u8F6E\u9996 token \u5E73\u5747", firstTokens.length ? elapsed(firstTokens.reduce((a, b) => a + b, 0) / firstTokens.length) : null),
-          statRow(kind === "live" ? "\u5F53\u524D\u6574\u8F6E\u5E73\u5747" : generation ? "\u751F\u6210\u901F\u5EA6\uFF08\u4F30\u7B97\uFF09" : "\u6574\u8F6E\u5E73\u5747\u901F\u5EA6", kind === "live" ? `${statistics.averageTps?.toFixed(1) ?? "\u2014"} tok/s` : speedLabel(statistics).replace(/^整轮 /, ""))
+          measured != null ? statRow("\u5DF2\u8BA1\u65F6\u901F\u5EA6\uFF08Agent Speed\uFF09", `${Math.round(measured)} tok/s`) : statRow(kind === "live" ? "\u5F53\u524D\u6574\u8F6E\u5E73\u5747" : generation ? "\u751F\u6210\u901F\u5EA6\uFF08\u4F30\u7B97\uFF09" : "\u6574\u8F6E\u5E73\u5747\u901F\u5EA6", kind === "live" ? `${statistics.averageTps?.toFixed(1) ?? "\u2014"} tok/s` : speedLabel(statistics).replace(/^整轮 /, ""))
         );
       }
       if (completedDate(turn)) nodes.push(statRow(turn?.endInferred ? "\u6700\u540E\u8BB0\u5F55\u65F6\u95F4" : "\u5B8C\u6210\u65F6\u95F4", completedDate(turn)));
@@ -1104,7 +1104,6 @@
       position: positionMetricPanel,
       update(value) {
         snapshot = value;
-        byId = new Map((value?.turns ?? []).map((turn) => [turn.id, turn]));
         renderMetricPanel();
       },
       remove(node) {
@@ -1127,7 +1126,6 @@
         panelAnchor = null;
         metricPanel = null;
         snapshot = null;
-        byId.clear();
       }
     };
   }
@@ -1370,7 +1368,7 @@
         return;
       }
       const items = [
-        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? []))}` },
+        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${snapshot.agentSpeedTps != null ? Math.round(snapshot.agentSpeedTps) + " tok/s" : speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? []))}` },
         { key: "tokens", icon: "token", kind: "tokens", text: `${fmt(snapshot.total.total_tokens)} tok \xB7 \u7F13\u5B58\u547D\u4E2D ${pct(snapshot.cacheHitPercent)}` },
         { key: "context", icon: "context", kind: "context", text: pct(snapshot.contextPercent) }
       ];

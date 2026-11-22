@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const {Worker} = require('node:worker_threads');
+const {WorkerClient} = require('./worker-client.cjs');
 const {UsageAccumulator} = require('./usage-data.cjs');
 const CACHE_NAME = 'codsh-usage-cache.json';
 
@@ -30,37 +30,12 @@ async function projectFromLog(filename, home) {
 
 class ProjectCache {
   constructor(home, delay=10000, limits={}) {
-    this.home=home; this.delay=delay; this.limits=limits;
-    this.pending=new Map(); this.requests=new Map(); this.sequence=0;
-    this.timer=null; this.flushing=null; this.worker=null; this.failed=false;
+    this.home=home; this.delay=delay;
+    this.pending=new Map(); this.timer=null; this.flushing=null;
+    this.client=new WorkerClient(path.join(__dirname,'project-cache-worker.cjs'),limits);
   }
-  request(type, data) {
-    if (this.failed) return Promise.reject(new Error('Project cache unavailable'));
-    if (!this.worker) {
-      const worker=new Worker(path.join(__dirname,'project-cache-worker.cjs'),{workerData:this.limits});
-      this.worker=worker;
-      worker.on('message',message=>{
-        const pending=this.requests.get(message.id);
-        if (!pending) return;
-        this.requests.delete(message.id);
-        if (message.error) pending.reject(new Error(message.error)); else pending.resolve(message.value);
-        if (!this.requests.size) worker.unref();
-      });
-      const fail=error=>{
-        this.failed=true;
-        for (const pending of this.requests.values()) pending.reject(error);
-        this.requests.clear(); worker.unref();
-      };
-      worker.on('error',fail);
-      worker.on('exit',()=>fail(new Error('Project cache worker exited')));
-      worker.unref();
-    }
-    const id=++this.sequence;
-    return new Promise((resolve,reject)=>{
-      this.requests.set(id,{resolve,reject}); this.worker.ref();
-      try { this.worker.postMessage({id,type,data}); }
-      catch (error) { this.requests.delete(id); if (!this.requests.size) this.worker.unref(); reject(error); }
-    });
+  request(type,data) {
+    return this.client.request(type,data);
   }
   async restore(cwd,id,filename,stat) {
     if (!cwd) return null;
@@ -71,7 +46,7 @@ class ProjectCache {
     } catch { return null; }
   }
   schedule(item) {
-    if (!item.cwd || this.failed) return;
+    if (!item.cwd || this.client.closed) return;
     this.pending.set(item.id,item);
     if (!this.timer) {
       this.timer=setTimeout(()=>{this.timer=null;void this.flush();},this.delay);
@@ -103,8 +78,8 @@ class ProjectCache {
   }
   async dispose() {
     if (this.timer) clearTimeout(this.timer);
-    this.pending.clear(); this.failed=true;
-    if (this.worker) await this.worker.terminate();
+    this.pending.clear();
+    await this.client.dispose();
   }
 }
 module.exports={ProjectCache,projectFromLog,CACHE_NAME};

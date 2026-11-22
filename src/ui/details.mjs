@@ -7,7 +7,6 @@ const { statisticsFor, usageParts } = usageModel;
 export function createDetailsPopover(onOpen) {
   let snapshot = null;
   let metricPanel = null, panelAnchor = null, panelCloseTimer = null, tokenModel = null;
-  let byId = new Map();
 
   function statRow(label,value) {
     const row=element('div','cu-stat-row');row.append(element('span','cu-stat-label',label),element('span','cu-stat-value',value??'暂无数据'));return row;
@@ -71,7 +70,7 @@ export function createDetailsPopover(onOpen) {
 
   function buildMetricDetails(anchor) {
     const kind=anchor.dataset.cuKind,id=anchor.dataset.cuTurn;
-    const turn=id?byId.get(id):null,last=snapshot?.turns?.at(-1);
+    const turn=id?snapshot?.turns?.find(turn=>turn.id===id):null,last=snapshot?.turns?.at(-1);
     const nodes=[];
     if(!snapshot?.available)return [element('p','cu-note','暂无可用统计数据')];
     if(kind==='tokens'){
@@ -89,12 +88,14 @@ export function createDetailsPopover(onOpen) {
       const statistics=statisticsFor(turns),generated=statistics.generatedMs,duration=statistics.durationMs;
       const firstTokens=turns.map(t=>t.timeToFirstTokenMs).filter(n=>n!=null);
       const generation=statistics.estimatedGenerationTps!=null;
+      const measured=kind==='session'&&!id?snapshot.agentSpeedTps:null;
       nodes.push(panelHeader(kind==='live'?'当前执行':turn?'本轮统计':'会话统计','speed'),
         statRow(active?'状态':'对话轮数',active?active.status:`${snapshot.turnCount} 轮`),
         statRow('模型请求',`${turns.reduce((n,t)=>n+t.requests,0)} 次`),
         statRow('模型生成区间',generated!=null?elapsed(generated):'暂无完整计时'),statRow('整轮耗时',duration!=null?elapsed(duration):null),
         statRow('工具调用',`${turns.reduce((n,t)=>n+t.tools,0)} 次`),
         statRow(active?'首 token 等待（TTFT）':'每轮首 token 平均',firstTokens.length?elapsed(firstTokens.reduce((a,b)=>a+b,0)/firstTokens.length):null),
+        measured!=null?statRow('已计时速度（Agent Speed）',`${Math.round(measured)} tok/s`):
         statRow(kind==='live'?'当前整轮平均':generation?'生成速度（估算）':'整轮平均速度',kind==='live'?`${statistics.averageTps?.toFixed(1)??'—'} tok/s`:speedLabel(statistics).replace(/^整轮 /,'')));
     }
     if(completedDate(turn))nodes.push(statRow(turn?.endInferred?'最后记录时间':'完成时间',completedDate(turn)));
@@ -159,7 +160,7 @@ export function createDetailsPopover(onOpen) {
     toggle: toggleMetricPanel,
     close: closeMetricPanel,
     position: positionMetricPanel,
-    update(value) { snapshot = value; byId = new Map((value?.turns ?? []).map(turn => [turn.id, turn])); renderMetricPanel(); },
+    update(value) { snapshot = value; renderMetricPanel(); },
     remove(node) { if (node === panelAnchor || node.contains(panelAnchor)) closeMetricPanel(); },
     outside(event) { if (panelAnchor && !panelAnchor.contains(event.target) && !metricPanel?.contains(event.target)) closeMetricPanel(); },
     keydown(event) {
@@ -169,7 +170,7 @@ export function createDetailsPopover(onOpen) {
       clearTimeout(panelCloseTimer);
       panelAnchor?.setAttribute('aria-expanded', 'false');
       metricPanel?.remove();
-      panelAnchor = null; metricPanel = null; snapshot = null; byId.clear();
+      panelAnchor = null; metricPanel = null; snapshot = null;
     }
   };
 }

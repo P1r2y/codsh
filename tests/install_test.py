@@ -117,7 +117,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(actual['extra'], 7)
             self.assertEqual((destination/'plugins/codex-usage/lib/project-cache.cjs').read_bytes(),
                              (install.ROOT/'src/project-cache.cjs').read_bytes())
-            for name in ['project-cache-worker.cjs', 'log-watch.cjs']:
+            for name in ['project-cache-worker.cjs', 'log-watch.cjs', 'agent-speed.cjs', 'usage-worker.cjs', 'worker-client.cjs']:
                 self.assertEqual((destination/'plugins/codex-usage/lib'/name).read_bytes(),
                                  (install.ROOT/'src'/name).read_bytes())
 

@@ -2,15 +2,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { RolloutStore } = require('./rollout-store.cjs');
+const {WorkerClient} = require('./worker-client.cjs');
 const { READ_CHANNEL, CHANGE_CHANNEL } = require('./protocol.cjs');
 const { LogWatchSet } = require('./log-watch.cjs');
 
 function register({isEnabled=()=>true}={}) {
-  const {ipcMain,app,BrowserWindow} = require('electron'), store = new RolloutStore();
+  const {ipcMain,app,BrowserWindow} = require('electron');
+  const reader = new WorkerClient(path.join(__dirname,'usage-worker.cjs'));
   const watches=new LogWatchSet((owner,message)=>{if(isEnabled())owner.send(CHANGE_CHANNEL,message);});
   const generations=new WeakMap();
-  app.once('will-quit',()=>{watches.dispose();void store.projectCache.dispose();});
+  app.once('will-quit',()=>{watches.dispose();void reader.dispose();});
   // 使用商店安装包的原始透明图标，随 Windows 任务栏主题选择黑色或白色版本。
   const {nativeTheme}=require('electron');
   const applyWindowIcon=win=>{
@@ -37,9 +38,9 @@ function register({isEnabled=()=>true}={}) {
     const knownRevision = typeof request?.knownRevision === 'string' ? request.knownRevision : undefined;
     const generation=(generations.get(event.sender)??0)+1;
     if(!request?.quotaOnly)generations.set(event.sender,generation);
-    const snapshot=await store.read(id,{knownRevision});
+    const {snapshot,filename}=await reader.request('read',{threadId:id,knownRevision});
     // A quota read is independent of the active conversation subscription.
-    const eventDriven=request?.quotaOnly||generations.get(event.sender)!==generation ? false : watches.select(event.sender,id?.toLowerCase(),id?store.files.get(id.toLowerCase()):null);
+    const eventDriven=request?.quotaOnly||generations.get(event.sender)!==generation ? false : watches.select(event.sender,id?.toLowerCase(),filename);
     return {...snapshot,enabled:true,eventDriven};
   });
 }

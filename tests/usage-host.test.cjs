@@ -14,8 +14,10 @@ test('迟到的会话读取不抢回新会话监听，额度查询不切换监�
   }
   class Watches {select(_owner,id,file){selected.push({id,file});return Boolean(id);}dispose(){}}
   const app=new EventEmitter();
-  const context={module:{exports:{}},process:{platform:'linux'},require:name=>{
-    if(name==='./rollout-store.cjs')return {RolloutStore:Store};
+  const context={__dirname,module:{exports:{}},process:{platform:'linux'},require:name=>{
+    if(name==='./worker-client.cjs')return {WorkerClient:class extends Store {
+      async request(type,{threadId}) { return {snapshot:await this.read(threadId),filename:this.files.get(threadId)}; }
+    }};
     if(name==='./log-watch.cjs')return {LogWatchSet:Watches};
     if(name==='./protocol.cjs')return protocol;
     if(name==='electron')return {app,ipcMain:{handle:(key,fn)=>handlers.set(key,fn)},nativeTheme:{}};

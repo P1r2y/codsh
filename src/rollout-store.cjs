@@ -9,8 +9,9 @@ const { ProjectCache, projectFromLog } = require('./project-cache.cjs');
 const { UUID } = require('./protocol.cjs');
 
 class RolloutStore {
-  constructor(home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex')) {
+  constructor(home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), agentSpeed = null) {
     this.home = home;
+    this.agentSpeed = agentSpeed;
     this.files = new Map();
     this.cache = new Map();
     this.lastIndex = 0;
@@ -48,6 +49,14 @@ class RolloutStore {
     return this.indexPromise;
   }
   async find(id) {
+    if (this.files.has(id)) return this.files.get(id);
+    if (!this.lastIndex && this.agentSpeed) {
+      const indexed = this.agentSpeed.find(this.home,id);
+      if (indexed) {
+        this.files.set(id,indexed);
+        return indexed;
+      }
+    }
     const alreadyIndexed = Boolean(this.lastIndex);
     await this.index();
     if (this.files.has(id)) return this.files.get(id);
@@ -146,7 +155,14 @@ class RolloutStore {
     const live = item.acc.turns.get(item.acc.currentId);
     const isLive = Boolean(live && !live.completed);
     const limits = this.latestLimits ?? item.acc.limits;
-    const revision = `${item.key}:${item.stateVersion}:${limits?.observedAt ?? ''}`;
+    if (this.agentSpeed && (item.speedSize !== stat.size || item.speedMtime !== stat.mtimeMs ||
+        Date.now() >= item.speedExpires || item.speedExpires === undefined)) {
+      item.agentSpeedTps = this.agentSpeed.measuredSpeed(filename,stat);
+      item.speedSize = stat.size;
+      item.speedMtime = stat.mtimeMs;
+      item.speedExpires = Date.now() + 30000;
+    }
+    const revision = `${item.key}:${item.stateVersion}:${limits?.observedAt ?? ''}:${item.agentSpeedTps ?? ''}`;
     if (options.knownRevision === revision) {
       const durationMs = isLive && Number.isFinite(live.start) ? Math.max(0, Date.now() - live.start) : null;
       const liveTick = isLive ? {id:live.id, durationMs,
@@ -157,7 +173,7 @@ class RolloutStore {
       item.snapshot = item.acc.snapshot();
       item.snapshotVersion = item.stateVersion;
     }
-    return {...item.snapshot, threadId:id, limits, updatedAt:stat.mtimeMs, revision};
+    return {...item.snapshot, threadId:id, limits, updatedAt:stat.mtimeMs, revision, agentSpeedTps:item.agentSpeedTps ?? null};
   }
   async update(item, size) {
     if (item.position === size) return false;
