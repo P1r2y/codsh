@@ -12,8 +12,8 @@ function structural(node) {
 }
 
 export function visible(node) {
-  return node && node.getClientRects().length > 0 &&
-    node.closest('[aria-hidden="true"],[hidden],[inert]') == null &&
+  return node && node.closest('[aria-hidden="true"],[hidden],[inert]') == null &&
+    node.getClientRects().length > 0 &&
     !['hidden', 'collapse'].includes(getComputedStyle(node).visibility);
 }
 
@@ -105,7 +105,14 @@ export class CodexDOM {
           !node.closest('[data-response-annotation-conversation]') &&
           Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
       // 同一轮只保留最后一条原生回复的操作栏；操作栏稍后出现时会移动同一个统计节点。
-      yield [key, { turn, parent: actions ?? response, inline: Boolean(actions) }];
+      const parent = actions ?? response;
+      const nativeKey = root.dataset.contentSearchTurnKey;
+      yield [key, { turn, parent, inline: Boolean(actions), stillCurrent: () =>
+        root.dataset.contentSearchTurnKey === nativeKey &&
+        normalizeThreadId(response.dataset.responseAnnotationConversation) === id &&
+        root.contains(response) && root.contains(parent) &&
+        visible(response) && (!actions || visible(actions))
+      }];
     }
   }
   quotaMount() {
@@ -135,7 +142,7 @@ export class CodexDOM {
     this.footers.add(footer);
   }
   markActions(node) {
-    node.classList.add('cu-action-row');
+    if (!node.classList.contains('cu-action-row')) node.classList.add('cu-action-row');
     this.actions.add(node);
   }
   reconcile() {

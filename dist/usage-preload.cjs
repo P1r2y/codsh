@@ -1,4 +1,4 @@
-// codsh-source-sha256:d8160a38a6e3b5270d64b880fb7b5d255b07571c3bc5f6c31dad9b704963a334
+// codsh-source-sha256:0a5d7f7cf2952d3fc3d4fe174d266cf160a9ac5567a3266d0c51281873cca606
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -182,6 +182,7 @@
       this.pending = null;
       this.iterator = null;
       this.disposed = false;
+      this.updates = [];
       this.requestIdle = globalThis.requestIdleCallback?.bind(globalThis) ?? ((fn) => setTimeout(() => fn({ didTimeout: false, timeRemaining: () => 50 }), 0));
       this.cancelIdle = globalThis.cancelIdleCallback?.bind(globalThis) ?? clearTimeout;
     }
@@ -205,7 +206,8 @@
     }
     run(deadline) {
       if (this.disposed) return;
-      if (!this.iterator) {
+      const deferred = this.updates.length > 0;
+      if (!this.iterator && !deferred) {
         const factory = this.pending;
         this.pending = null;
         if (!factory) return;
@@ -213,19 +215,28 @@
         this.lastStarted = this.now();
       }
       const start = this.now(), limit = deadline.didTimeout ? 1 : this.batchSize;
+      const hasTime = () => this.now() - start < this.budgetMs && deadline.timeRemaining() >= 1;
       try {
-        for (let count = 0; count < limit; count++) {
-          if (count && (this.now() - start >= this.budgetMs || deadline.timeRemaining() < 1)) break;
-          if (this.iterator.next().done) {
-            this.iterator = null;
-            break;
+        if (!deferred) {
+          for (let count = 0; count < limit && (count === 0 || hasTime()); count++) {
+            const { value, done } = this.iterator.next();
+            if (value) this.updates.push(value);
+            if (done) {
+              this.iterator = null;
+              break;
+            }
           }
         }
+        for (let count = 0; count < limit && this.updates.length && (count === 0 || hasTime()); count++) {
+          const update = this.updates.shift();
+          update(deferred);
+        }
       } catch (error) {
+        this.updates.length = 0;
         this.iterator = null;
         console.warn("[CodexUsageUI]", String(error));
       }
-      if (this.iterator) this.plan(this.gap);
+      if (this.iterator || this.updates.length) this.plan(this.gap);
       else if (this.pending) this.plan(Math.max(this.gap, this.interval - (this.now() - this.lastStarted)));
     }
     cancel() {
@@ -234,6 +245,7 @@
       this.timer = null;
       this.idle = null;
       this.pending = null;
+      this.updates.length = 0;
       this.iterator?.return?.();
       this.iterator = null;
       this.lastStarted = -Infinity;
@@ -400,7 +412,7 @@
     return node.nodeType === 1 && !node.closest(OWN) && (node.matches(MARKERS) || node.querySelector(MARKERS) !== null);
   }
   function visible(node) {
-    return node && node.getClientRects().length > 0 && node.closest('[aria-hidden="true"],[hidden],[inert]') == null && !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
+    return node && node.closest('[aria-hidden="true"],[hidden],[inert]') == null && node.getClientRects().length > 0 && !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
   }
   function uniqueThread(nodes, attribute) {
     const ids = new Set(nodes.map((node) => normalizeThreadId(node.getAttribute(attribute))).filter(Boolean));
@@ -484,7 +496,14 @@
         }
         seen.add(key);
         const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1) ?? [...root.querySelectorAll(".turn-action-controls")].filter((node) => visible(node) && !node.closest("[data-response-annotation-conversation]") && Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
-        yield [key, { turn, parent: actions ?? response, inline: Boolean(actions) }];
+        const parent = actions ?? response;
+        const nativeKey = root.dataset.contentSearchTurnKey;
+        yield [key, {
+          turn,
+          parent,
+          inline: Boolean(actions),
+          stillCurrent: () => root.dataset.contentSearchTurnKey === nativeKey && normalizeThreadId(response.dataset.responseAnnotationConversation) === id && root.contains(response) && root.contains(parent) && visible(response) && (!actions || visible(actions))
+        }];
       }
     }
     quotaMount() {
@@ -511,7 +530,7 @@
       this.footers.add(footer);
     }
     markActions(node) {
-      node.classList.add("cu-action-row");
+      if (!node.classList.contains("cu-action-row")) node.classList.add("cu-action-row");
       this.actions.add(node);
     }
     reconcile() {
@@ -1435,8 +1454,32 @@
       this.details.update(snapshot);
       this.dom.reconcile();
     }
+    renderReply(threadId, id, mount, realign) {
+      let group = this.replies.get(id);
+      if (!group) {
+        const node = element("div", "cu-turn");
+        node.setAttribute("data-markdown-copy", "exclude");
+        node.dataset.cuThread = threadId;
+        node.dataset.cuTurn = id;
+        group = this.group(node);
+        this.replies.set(id, group);
+      }
+      group.node.classList.toggle("cu-turn-inline", mount.inline);
+      if (mount.inline) this.dom.markActions(mount.parent);
+      group.mount(mount.parent);
+      const turn = mount.turn;
+      group.render([
+        { key: "tokens", icon: "token", kind: "tokens", turnId: id, text: `\u7528\u91CF ${fmt(turn.usage.total_tokens)} tok` },
+        { key: "cache", kind: "tokens", turnId: id, text: `\u7F13\u5B58 ${pct(turn.cacheHitPercent)}` },
+        { key: "speed", kind: "session", turnId: id, text: speedLabel(turn) }
+      ]);
+      if (realign) group.align();
+    }
     *renderReplies() {
-      const threadId = this.controller.threadId, snapshot = this.controller.snapshot, keep = /* @__PURE__ */ new Set(), realign = this.realignReplies;
+      const threadId = this.controller.threadId;
+      const snapshot = this.controller.snapshot;
+      const realign = this.realignReplies;
+      const keep = /* @__PURE__ */ new Set();
       this.realignReplies = false;
       if (!snapshot?.available) return;
       for (const entry of this.dom.scanReplies(snapshot, threadId)) {
@@ -1446,37 +1489,21 @@
           continue;
         }
         const [id, mount] = entry;
-        if (!mount.parent.isConnected) {
-          yield;
-          continue;
-        }
-        keep.add(id);
-        let group = this.replies.get(id);
-        if (!group) {
-          const node = element("div", "cu-turn");
-          node.setAttribute("data-markdown-copy", "exclude");
-          group = this.group(node);
-          this.replies.set(id, group);
-        }
-        group.node.dataset.cuThread = threadId;
-        group.node.dataset.cuTurn = id;
-        group.node.classList.toggle("cu-turn-inline", mount.inline);
-        if (mount.inline) this.dom.markActions(mount.parent);
-        group.mount(mount.parent);
-        const turn = mount.turn;
-        group.render([
-          { key: "tokens", icon: "token", kind: "tokens", turnId: id, text: `\u7528\u91CF ${fmt(turn.usage.total_tokens)} tok` },
-          { key: "cache", kind: "tokens", turnId: id, text: `\u7F13\u5B58 ${pct(turn.cacheHitPercent)}` },
-          { key: "speed", kind: "session", turnId: id, text: speedLabel(turn) }
-        ]);
-        if (realign) group.align();
-        yield;
+        yield (deferred) => {
+          if (!mount.parent.isConnected || deferred && !mount.stillCurrent()) return;
+          keep.add(id);
+          this.renderReply(threadId, id, mount, realign);
+        };
       }
-      for (const [id, group] of this.replies) if (!keep.has(id)) {
-        group.dispose();
-        this.replies.delete(id);
-      }
-      this.dom.reconcile();
+      return () => {
+        for (const [id, group] of this.replies) {
+          if (!keep.has(id)) {
+            group.dispose();
+            this.replies.delete(id);
+          }
+        }
+        this.dom.reconcile();
+      };
     }
     align() {
       const composer = this.dom.composer();

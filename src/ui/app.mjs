@@ -121,39 +121,51 @@ export class UsagePlugin {
     this.details.update(snapshot);
     this.dom.reconcile();
   }
-  *renderReplies() {
-    const threadId=this.controller.threadId,snapshot=this.controller.snapshot,keep=new Set(),realign=this.realignReplies;
-    this.realignReplies=false;
-    if(!snapshot?.available)return;
-    for (const entry of this.dom.scanReplies(snapshot,threadId)) {
-      if(this.life.disposed||document.visibilityState==='hidden'||this.controller.threadId!==threadId)return;
-      if(!entry){yield;continue;}
-      const [id,mount]=entry;
-      if(!mount.parent.isConnected){yield;continue;}
-      keep.add(id);
-      let group = this.replies.get(id);
-      if (!group) {
-        const node = element('div', 'cu-turn');
-        node.setAttribute('data-markdown-copy', 'exclude');
-        group = this.group(node);
-        this.replies.set(id, group);
-      }
-      group.node.dataset.cuThread = threadId;
-      group.node.dataset.cuTurn = id;
-      group.node.classList.toggle('cu-turn-inline', mount.inline);
-      if (mount.inline) this.dom.markActions(mount.parent);
-      group.mount(mount.parent);
-      const turn = mount.turn;
-      group.render([
-        {key:'tokens',icon:'token',kind:'tokens',turnId:id,text:`用量 ${fmt(turn.usage.total_tokens)} tok`},
-        {key:'cache',kind:'tokens',turnId:id,text:`缓存 ${pct(turn.cacheHitPercent)}`},
-        {key:'speed',kind:'session',turnId:id,text:speedLabel(turn)}
-      ]);
-      if(realign)group.align();
-      yield;
+  renderReply(threadId, id, mount, realign) {
+    let group = this.replies.get(id);
+    if (!group) {
+      const node = element('div', 'cu-turn');
+      node.setAttribute('data-markdown-copy', 'exclude');
+      node.dataset.cuThread = threadId;
+      node.dataset.cuTurn = id;
+      group = this.group(node);
+      this.replies.set(id, group);
     }
-    for (const [id, group] of this.replies) if (!keep.has(id)) { group.dispose(); this.replies.delete(id); }
-    this.dom.reconcile();
+    group.node.classList.toggle('cu-turn-inline', mount.inline);
+    if (mount.inline) this.dom.markActions(mount.parent);
+    group.mount(mount.parent);
+    const turn = mount.turn;
+    group.render([
+      {key:'tokens',icon:'token',kind:'tokens',turnId:id,text:`用量 ${fmt(turn.usage.total_tokens)} tok`},
+      {key:'cache',kind:'tokens',turnId:id,text:`缓存 ${pct(turn.cacheHitPercent)}`},
+      {key:'speed',kind:'session',turnId:id,text:speedLabel(turn)}
+    ]);
+    if (realign) group.align();
+  }
+  *renderReplies() {
+    const threadId = this.controller.threadId;
+    const snapshot = this.controller.snapshot;
+    const realign = this.realignReplies;
+    const keep = new Set();
+    this.realignReplies = false;
+    if (!snapshot?.available) return;
+    for (const entry of this.dom.scanReplies(snapshot, threadId)) {
+      if (this.life.disposed || document.visibilityState === 'hidden' || this.controller.threadId !== threadId) return;
+      if (!entry) { yield; continue; }
+      const [id, mount] = entry;
+      yield deferred => {
+        if (!mount.parent.isConnected || (deferred && !mount.stillCurrent())) return;
+        keep.add(id);
+        this.renderReply(threadId, id, mount, realign);
+      };
+    }
+    // Run cleanup after the last batch has mounted its rows.
+    return () => {
+      for (const [id, group] of this.replies) {
+        if (!keep.has(id)) { group.dispose(); this.replies.delete(id); }
+      }
+      this.dom.reconcile();
+    };
   }
   align() {
     const composer = this.dom.composer();

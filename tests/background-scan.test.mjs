@@ -2,6 +2,24 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {BackgroundScan} from '../src/ui/background-scan.mjs';
 
+test('每批先完成全部布局读取，再挂载回复，最后清理已移除的行', t => {
+  t.mock.timers.enable({apis:['setTimeout','Date'], now:0});
+  const scan = new BackgroundScan({batchSize:2, now:() => Date.now()});
+  const events = [];
+  scan.request(function* () {
+    for (const id of ['a', 'b', 'c']) {
+      events.push('read ' + id);
+      yield () => events.push('mount ' + id);
+    }
+    return () => events.push('cleanup');
+  });
+  t.mock.timers.tick(0);
+  assert.deepEqual(events, ['read a', 'read b', 'mount a', 'mount b']);
+  t.mock.timers.tick(48);
+  assert.deepEqual(events.slice(4), ['read c', 'mount c', 'cleanup']);
+  scan.dispose();
+});
+
 test('历史扫描每批最多八项，批间留出空闲时间',t=>{
   t.mock.timers.enable({apis:['setTimeout','Date'],now:0});
   const scan=new BackgroundScan({now:()=>Date.now()}),seen=[];
@@ -10,6 +28,26 @@ test('历史扫描每批最多八项，批间留出空闲时间',t=>{
   t.mock.timers.tick(47);assert.equal(seen.length,8);
   t.mock.timers.tick(1);assert.equal(seen.length,16);
   t.mock.timers.tick(48);assert.equal(seen.length,20);
+  scan.dispose();
+});
+
+test('耗时的挂载也受时间预算限制，取消会丢弃待挂载的行', t => {
+  t.mock.timers.enable({apis:['setTimeout','Date'], now:0});
+  let clock = 0;
+  const scan = new BackgroundScan({now:() => clock});
+  const mounted = [];
+  scan.request(function* () {
+    for (let id = 0; id < 6; id++) {
+      yield deferred => { mounted.push([id, deferred]); clock += 2; };
+    }
+  });
+  t.mock.timers.tick(0);
+  assert.deepEqual(mounted, [[0,false],[1,false]]);
+  t.mock.timers.tick(48);
+  assert.deepEqual(mounted.slice(2), [[2,true],[3,true]]);
+  scan.cancel();
+  t.mock.timers.tick(1000);
+  assert.equal(mounted.length, 4);
   scan.dispose();
 });
 
