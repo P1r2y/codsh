@@ -1,9 +1,10 @@
 import { Lifetime } from './lifetime.mjs';
 import { BackgroundScan } from './background-scan.mjs';
+import { ReplyCache } from './reply-cache.mjs';
 import { ConversationController } from './controller.mjs';
 import { QuotaController } from './quota-controller.mjs';
 import { CodexDOM } from './dom.mjs';
-import { MetricGroup } from './metrics.mjs';
+import { MetricGroup, invalidateMetricLayout } from './metrics.mjs';
 import { createDetailsPopover } from './details.mjs';
 import { createQuotaWidget } from './quota.mjs';
 import { element } from './elements.mjs';
@@ -17,6 +18,8 @@ export class UsagePlugin {
     this.life = new Lifetime();
     this.dom = new CodexDOM();
     this.replies = new Map();
+    this.replyCache = new ReplyCache();
+    this.sessionSpeeds = new WeakMap();
     this.replyScan = new BackgroundScan();
     this.readTimer = null;
     this.renderTimer = null;
@@ -65,7 +68,7 @@ export class UsagePlugin {
     const switched=this.controller.select(context.id);
     if(switched){
       this.replyScan.cancel();clearTimeout(this.readTimer);this.readTimer=null;
-      for(const group of this.replies.values())group.dispose();this.replies.clear();
+      this.leaveReplies();
     }
     this.render(context);
     if(document.visibilityState==='hidden')return;
@@ -78,12 +81,17 @@ export class UsagePlugin {
       this.strip.message(id ? '用量统计 · 等待本地会话数据' : '用量统计 · 开始对话后显示');
       return;
     }
+    const last = snapshot.turns?.at(-1);
+    let speed = this.sessionSpeeds.get(snapshot);
+    if (!speed || speed.duration !== last?.durationMs) {
+      speed = {duration:last?.durationMs, label:speedLabel(usageModel.statisticsFor(snapshot.turns ?? []))};
+      this.sessionSpeeds.set(snapshot, speed);
+    }
     const items = [
-      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${speedLabel(usageModel.statisticsFor(snapshot.turns ?? []))}`},
+      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${speed.label}`},
       {key:'tokens',icon:'token',kind:'tokens',text:`${fmt(snapshot.total.total_tokens)} tok · 缓存命中 ${pct(snapshot.cacheHitPercent)}`},
       {key:'context',icon:'context',kind:'context',text:pct(snapshot.contextPercent)}
     ];
-    const last = snapshot.turns?.at(-1);
     if (last && !last.completed) items.push({key:'live',icon:'speed',kind:'live',text:`当前 ${last.averageTps?.toFixed(1) ?? '—'} tok/s`,live:true});
     this.strip.render(items);
   }
@@ -110,10 +118,17 @@ export class UsagePlugin {
       this.strip.node.dataset.cuThread = context.id ?? '';
       this.renderStrip(snapshot, context.id);
     } else this.strip.unmount();
-    if(snapshot?.available)this.replyScan.request(()=>this.renderReplies());
-    else{
+    if (snapshot?.available) {
+      const thread = this.replyCache.select(context.id, snapshot);
+      if (this.replyThread !== thread) {
+        this.replyThread = thread;
+        this.replies = thread.groups;
+        thread.restore();
+      }
+      if (!thread.indexed || thread.dirty.size) this.replyScan.request(() => this.renderReplies(thread));
+    } else {
       this.replyScan.cancel();
-      for(const group of this.replies.values())group.dispose();this.replies.clear();
+      this.leaveReplies();
     }
     this.quotaState.useFallback(snapshot?.limits);
     this.quotaMount=this.dom.quotaMount();
@@ -121,7 +136,16 @@ export class UsagePlugin {
     this.details.update(snapshot);
     this.dom.reconcile();
   }
-  renderReply(threadId, id, mount, realign) {
+  leaveReplies() {
+    if (!this.replyThread) return;
+    for (const group of this.replies.values()) {
+      this.dom.setActionParent(group.node, null);
+      group.unmount();
+    }
+    this.replyThread = null;
+    this.replies = new Map();
+  }
+  renderReply(threadId, id, mount, turn) {
     let group = this.replies.get(id);
     if (!group) {
       const node = element('div', 'cu-turn');
@@ -132,47 +156,50 @@ export class UsagePlugin {
       this.replies.set(id, group);
     }
     group.node.classList.toggle('cu-turn-inline', mount.inline);
-    if (mount.inline) this.dom.markActions(mount.parent);
+    this.dom.setActionParent(group.node, mount.inline ? mount.parent : null);
     group.mount(mount.parent);
-    const turn = mount.turn;
     group.render([
       {key:'tokens',icon:'token',kind:'tokens',turnId:id,text:`用量 ${fmt(turn.usage.total_tokens)} tok`},
       {key:'cache',kind:'tokens',turnId:id,text:`缓存 ${pct(turn.cacheHitPercent)}`},
       {key:'speed',kind:'session',turnId:id,text:speedLabel(turn)}
     ]);
-    if (realign) group.align();
   }
-  *renderReplies() {
-    const threadId = this.controller.threadId;
-    const snapshot = this.controller.snapshot;
-    const realign = this.realignReplies;
-    const keep = new Set();
-    this.realignReplies = false;
-    if (!snapshot?.available) return;
-    for (const entry of this.dom.scanReplies(snapshot, threadId)) {
-      if (this.life.disposed || document.visibilityState === 'hidden' || this.controller.threadId !== threadId) return;
-      if (!entry) { yield; continue; }
-      const [id, mount] = entry;
+  *renderReplies(thread) {
+    for (const change of thread.changes()) {
+      if (this.life.disposed || document.visibilityState === 'hidden' || this.replyThread !== thread) return;
+      if (!change) { yield; continue; }
+      const {key, turn, mount} = change;
       yield deferred => {
-        if (!mount.parent.isConnected || (deferred && !mount.stillCurrent())) return;
-        keep.add(id);
-        this.renderReply(threadId, id, mount, realign);
+        if (this.replyThread !== thread || thread.dirty.has(key)) return;
+        if (mount) {
+          if (mount.parent.isConnected && (!deferred || mount.stillCurrent()))
+            this.renderReply(thread.id, key, mount, turn);
+        } else {
+          const group = thread.groups.get(key);
+          if (group) {
+            this.dom.setActionParent(group.node, null);
+            // A retained pane may already be hidden while its navigation event is pending.
+            if (turn?.completed && thread.byTurn.has(key)) group.unmount();
+            else {
+              group.dispose();
+              thread.groups.delete(key);
+            }
+          }
+        }
       };
     }
-    // Run cleanup after the last batch has mounted its rows.
-    return () => {
-      for (const [id, group] of this.replies) {
-        if (!keep.has(id)) { group.dispose(); this.replies.delete(id); }
-      }
-      this.dom.reconcile();
-    };
+    return () => this.dom.reconcile();
   }
   align() {
+    invalidateMetricLayout();
     const composer = this.dom.composer();
     if (!this.dom.chatMode(composer)) this.dom.alignComposer(composer, true);
     this.strip.align();
-    this.realignReplies=true;
-    if(this.controller.snapshot?.available)this.replyScan.request(()=>this.renderReplies());
+    if (this.replyThread) {
+      const thread = this.replyThread;
+      thread.restore();
+      this.replyScan.request(() => this.renderReplies(thread));
+    }
     this.details.position();
     this.quota.position();
   }
@@ -181,8 +208,13 @@ export class UsagePlugin {
     this.started = true;
     document.head.append(this.style);
     document.documentElement.dataset.cuUi = 'ready';
-    const reconcile = (urgent = false) => {
-      if (this.renderTimer) return;
+    const reconcile = (delay = 200) => {
+      const deadline = performance.now() + delay;
+      if (this.renderTimer !== null) {
+        if (this.renderDeadline <= deadline) return;
+        clearTimeout(this.renderTimer);
+      }
+      this.renderDeadline = deadline;
       this.renderTimer = setTimeout(() => {
         this.renderTimer = null;
         if (document.visibilityState==='hidden') return;
@@ -191,27 +223,38 @@ export class UsagePlugin {
         else {
           this.render(context);
         }
-      }, urgent ? 80 : 200);
+      }, delay);
     };
-    this.dom.watchVisibility(()=>reconcile(true));
+    this.dom.watchVisibility(scopes => {
+      this.dom.fallbackThread = null;
+      for (const scope of scopes) this.replyCache.visibility(scope);
+      reconcile(0);
+    });
     const observer = new MutationObserver(records => {
+      const revision = this.replyThread?.domRevision;
+      this.replyCache.observe(records, this.replyThread, this.dom);
       if (document.visibilityState === 'hidden') return;
       let needsRender = false;
       for (const record of records) {
         if (this.dom.remountActions(record, this.controller.threadId, this.replies)) continue;
         needsRender ||= this.dom.relevant(record);
       }
-      if (needsRender) reconcile(records.some(record => record.type === 'attributes'));
+      if (needsRender || this.replyThread?.domRevision !== revision) {
+        const navigating = records.some(record => record.attributeName === 'data-above-composer-conversation-id' ||
+          record.type === 'attributes' && this.dom.visibilityNodes.has(record.target));
+        reconcile(navigating ? 0 : records.some(record => record.type === 'attributes') ? 80 : 200);
+      }
     });
     observer.observe(document.body, {childList:true,subtree:true,attributes:true,attributeFilter:[
       'data-above-composer-conversation-id','data-content-search-turn-key',
-      'data-response-annotation-conversation','data-chatgpt-composer','aria-hidden','hidden','inert'
+      'data-response-annotation-conversation','data-chatgpt-composer','data-thread-find-composer',
+      'data-app-navigation-rail','aria-hidden','hidden','inert'
     ]});
     this.life.own(() => observer.disconnect());
     this.life.listen(window, 'resize', () => this.align());
     this.life.listen(window, 'focus', () => this.synchronize());
     this.life.listen(document,'visibilitychange',()=>{
-      if(document.visibilityState!=='hidden')this.synchronize(this.dom.context(),true);
+      if(document.visibilityState!=='hidden'){this.replyThread?.restore();this.synchronize(this.dom.context(),true);}
       else{this.replyScan.cancel();clearTimeout(this.readTimer);this.readTimer=null;}
     });
     this.life.listen(window, 'popstate', () => this.synchronize());
@@ -246,8 +289,7 @@ export class UsagePlugin {
     this.controller.dispose();
     this.quotaState.dispose();
     this.strip.dispose();
-    for (const group of this.replies.values()) group.dispose();
-    this.replies.clear();
+    this.replyCache.dispose();
     this.details.dispose();
     this.quota.dispose();
     this.dom.dispose();

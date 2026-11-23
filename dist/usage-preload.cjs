@@ -1,4 +1,4 @@
-// codsh-source-sha256:0a5d7f7cf2952d3fc3d4fe174d266cf160a9ac5567a3266d0c51281873cca606
+// codsh-source-sha256:d05ccf1b9d3fbaff3280f8cb123151909f0fb0c7bc976ecab5d6c2c081faeefa
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -256,8 +256,422 @@
     }
   };
 
-  // src/ui/controller.mjs
+  // src/ui/reply-cache.mjs
+  var import_protocol2 = __toESM(require_protocol(), 1);
+
+  // src/ui/dom.mjs
   var import_protocol = __toESM(require_protocol(), 1);
+  var { normalizeThreadId } = import_protocol.default;
+  var OWN = ".cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style";
+  var MARKERS = "[data-thread-find-composer],[data-thread-scroll-footer],[data-above-composer-conversation-id],[data-content-search-turn-key],[data-response-annotation-conversation],.turn-action-controls,[data-app-navigation-rail],[data-transition-phase],[data-chatgpt-composer]";
+  function structural(node) {
+    return node.nodeType === 1 && !node.closest(OWN) && (node.matches(MARKERS) || node.querySelector(MARKERS) !== null);
+  }
+  function visible(node) {
+    return node && node.closest('[aria-hidden="true"],[hidden],[inert]') == null && node.getClientRects().length > 0 && !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
+  }
+  function uniqueThread(nodes, attribute) {
+    const ids = new Set(nodes.map((node) => normalizeThreadId(node.getAttribute(attribute))).filter(Boolean));
+    return ids.size === 1 ? [...ids][0] : null;
+  }
+  function composerRoot(node) {
+    const footer = node.closest("[data-thread-scroll-footer]");
+    if (!footer) return node;
+    let parent;
+    while ((parent = node.parentElement?.closest("[data-thread-find-composer]")) && footer.contains(parent)) node = parent;
+    return node;
+  }
+  function turnId(root, turns) {
+    const key = root.getAttribute("data-content-search-turn-key") ?? "";
+    const candidates = [key, ...key.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi) ?? [], ...key.split(/[^\w-]+/)];
+    return candidates.find((candidate) => turns.has(candidate)) ?? null;
+  }
+  var CodexDOM = class {
+    constructor() {
+      this.footers = /* @__PURE__ */ new Set();
+      this.actions = /* @__PURE__ */ new Map();
+      this.actionParents = /* @__PURE__ */ new WeakMap();
+      this.visibilityNodes = /* @__PURE__ */ new Set();
+    }
+    invalidateShell() {
+      this.composerNodes = null;
+      this.rails = null;
+      this.fallbackThread = null;
+    }
+    responseChanged(response) {
+      if (!this.fallbackResponses) return;
+      this.fallbackThread = null;
+      if (response.isConnected && response.hasAttribute("data-response-annotation-conversation")) this.fallbackResponses.add(response);
+      else this.fallbackResponses.delete(response);
+    }
+    watchVisibility(callback) {
+      this.visibilityObserver = new MutationObserver((records) => {
+        const normalize = (value, name) => name === "class" ? (value ?? "").split(/\s+/).filter((x) => x && !x.startsWith("cu-")).sort().join(" ") : (value ?? "").split(";").map((x) => x.trim()).filter((x) => /^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(";");
+        const changed = records.filter((r) => normalize(r.oldValue, r.attributeName) !== normalize(r.target.getAttribute(r.attributeName), r.attributeName));
+        if (changed.length) callback(new Set(changed.map((r) => r.target)));
+      });
+    }
+    trackVisibility(nodes) {
+      const next = /* @__PURE__ */ new Set();
+      for (const node of nodes) for (let parent = node; parent; parent = parent.parentElement) next.add(parent);
+      if (next.size === this.visibilityNodes.size && [...next].every((node) => this.visibilityNodes.has(node))) return;
+      this.visibilityNodes = next;
+      this.visibilityObserver?.disconnect();
+      for (const node of next) this.visibilityObserver?.observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ["class", "style"] });
+    }
+    composer() {
+      if (!this.composerNodes) {
+        this.composerNodes = [...document.querySelectorAll("[data-thread-find-composer]")].filter((node) => !node.matches("button,input,textarea"));
+        this.trackVisibility(this.composerNodes);
+      }
+      const all = this.composerNodes;
+      const nodes = [...new Set(all.filter(visible).map(composerRoot))];
+      const footers = nodes.filter((node) => node.closest("[data-thread-scroll-footer]"));
+      const candidates = footers.length ? footers : nodes;
+      return candidates.find((node) => node.contains(document.activeElement)) ?? candidates.at(-1) ?? null;
+    }
+    thread(composer = this.composer()) {
+      for (const scope2 of [composer, composer?.closest("[data-thread-scroll-footer]")]) {
+        const portals = scope2 ? [...scope2.querySelectorAll("[data-above-composer-conversation-id]")] : [];
+        if (portals.length) return uniqueThread(portals, "data-above-composer-conversation-id");
+      }
+      const container = composer?.closest(".thread-scroll-container");
+      if (composer && !container) return null;
+      const scope = container ?? document;
+      if (this.fallbackThread?.scope === scope) return this.fallbackThread.id;
+      this.fallbackResponses ??= new Set(document.querySelectorAll("[data-response-annotation-conversation]"));
+      const responses = [...this.fallbackResponses].filter((node) => (scope === document || scope.contains(node)) && visible(node));
+      const id = uniqueThread(responses, "data-response-annotation-conversation");
+      this.fallbackThread = { scope, id };
+      return id;
+    }
+    chatMode(composer) {
+      return Boolean(composer?.matches("[data-chatgpt-composer]") || [...composer?.querySelectorAll("[data-chatgpt-composer]") ?? []].some(visible));
+    }
+    context() {
+      const composer = this.composer();
+      return { composer, id: this.thread(composer) };
+    }
+    quotaMount() {
+      this.rails ??= [...document.querySelectorAll("[data-app-navigation-rail]")];
+      const rail = this.rails.find(visible);
+      if (!rail) return null;
+      const buttons = [...rail.querySelectorAll('button,[role="button"]')].filter((node) => !node.closest(OWN));
+      const nativeQuota = buttons.find((node) => node.querySelector("[data-transition-phase]") && !node.closest('[hidden],[aria-hidden="true"],[inert]'));
+      if (nativeQuota) return { parent: nativeQuota.parentElement, before: nativeQuota };
+      let anchor = buttons.find((node) => /^(下载|Downloads?)(?:\b|$)|查看下载/i.test(node.getAttribute("aria-label") ?? node.getAttribute("title") ?? "")) ?? buttons.at(-1);
+      if (!anchor) return { parent: rail, before: null };
+      while (anchor.parentElement !== rail && anchor.parentElement && !/column/.test(getComputedStyle(anchor.parentElement).flexDirection)) anchor = anchor.parentElement;
+      return { parent: anchor.parentElement, before: anchor };
+    }
+    alignComposer(composer, remeasure = false) {
+      const footer = composer?.closest("[data-thread-scroll-footer]");
+      if (!footer || this.footers.has(footer) && !remeasure) return;
+      footer.classList.remove("cu-footer");
+      const padding = parseFloat(getComputedStyle(footer).paddingBottom) || 0;
+      const nativeAfter = footer.classList.contains("after:h-(--thread-composer-bottom-inset)") ? getComputedStyle(footer, "::after") : null;
+      const after = nativeAfter && nativeAfter.display !== "none" && nativeAfter.content !== "none" ? parseFloat(nativeAfter.height) || 0 : 0;
+      const inset = padding + after;
+      footer.style.setProperty("--cu-strip-height", `${30 + Math.max(0, inset - 8)}px`);
+      footer.classList.add("cu-footer");
+      this.footers.add(footer);
+    }
+    setActionParent(stats, row) {
+      const old = this.actionParents.get(stats);
+      if (old && old !== row && this.actions.get(old) === stats) {
+        old.classList.remove("cu-action-row");
+        this.actions.delete(old);
+      }
+      if (row) {
+        if (!row.classList.contains("cu-action-row")) row.classList.add("cu-action-row");
+        this.actions.set(row, stats);
+        this.actionParents.set(stats, row);
+      } else this.actionParents.delete(stats);
+    }
+    reconcile() {
+      for (const footer of this.footers) {
+        if (footer.isConnected && footer.querySelector(".cu-strip")) continue;
+        footer.classList.remove("cu-footer");
+        footer.style.removeProperty("--cu-strip-height");
+        this.footers.delete(footer);
+      }
+    }
+    remountActions(record, threadId, replies) {
+      if (record.removedNodes.length !== 1 || record.addedNodes.length !== 1) return false;
+      const old = record.removedNodes[0], row = record.addedNodes[0];
+      if (!this.actions.has(old) || old.isConnected || !row.matches?.(".turn-action-controls")) return false;
+      const response = row.closest("[data-response-annotation-conversation]");
+      if (!response || normalizeThreadId(response.dataset.responseAnnotationConversation) !== threadId) return false;
+      const root = response.closest("[data-content-search-turn-key]");
+      const group = root && replies.get(turnId(root, replies));
+      if (!group || group.node.parentElement !== old || row.querySelector(".cu-turn") || !visible(row)) return false;
+      this.setActionParent(group.node, row);
+      group.mount(row);
+      return true;
+    }
+    relevant(record) {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      if (target?.closest(OWN)) return false;
+      if (record.type === "attributes") {
+        return !["hidden", "aria-hidden", "inert"].includes(record.attributeName) || structural(target);
+      }
+      const nodes = [...record.addedNodes, ...record.removedNodes];
+      if ([...record.removedNodes].some((node) => node.nodeType === 1 && node.matches(".cu-strip,.cu-turn") && !node.isConnected)) return true;
+      if (nodes.some(structural)) return true;
+      return target?.matches("[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]") && nodes.some((node) => node.nodeType === 1 && !node.matches(OWN));
+    }
+    dispose() {
+      this.visibilityObserver?.disconnect();
+      this.visibilityNodes.clear();
+      for (const footer of this.footers) {
+        footer.classList.remove("cu-footer");
+        footer.style.removeProperty("--cu-strip-height");
+      }
+      for (const row of this.actions.keys()) row.classList.remove("cu-action-row");
+      this.footers.clear();
+      this.actions.clear();
+    }
+  };
+
+  // src/ui/reply-cache.mjs
+  var RESPONSE = "[data-response-annotation-conversation]";
+  var TURN = "[data-content-search-turn-key]";
+  var ACTION = ".turn-action-controls";
+  var SHELL = "[data-thread-find-composer],[data-app-navigation-rail]";
+  var MARKERS2 = [RESPONSE, ACTION, SHELL].join(",");
+  function lastVisible(nodes) {
+    return nodes.findLast(visible);
+  }
+  function statsChanged(previous, next) {
+    return previous?.usage?.total_tokens !== next?.usage?.total_tokens || previous?.cacheHitPercent !== next?.cacheHitPercent || previous?.estimatedGenerationTps !== next?.estimatedGenerationTps || previous?.averageTps !== next?.averageTps;
+  }
+  var ConversationReplies = class {
+    constructor(id, owners) {
+      this.id = id;
+      this.owners = owners;
+      this.indexed = false;
+      this.nodes = /* @__PURE__ */ new Map();
+      this.byTurn = /* @__PURE__ */ new Map();
+      this.unresolved = /* @__PURE__ */ new Set();
+      this.turns = /* @__PURE__ */ new Map();
+      this.groups = /* @__PURE__ */ new Map();
+      this.mounts = /* @__PURE__ */ new Map();
+      this.dirty = /* @__PURE__ */ new Set();
+      this.domRevision = 0;
+    }
+    invalidate(key) {
+      if (key == null) return;
+      this.mounts.delete(key);
+      this.dirty.add(key);
+      this.domRevision++;
+    }
+    remove(response) {
+      const row = this.nodes.get(response);
+      if (!row) return;
+      this.nodes.delete(response);
+      this.unresolved.delete(response);
+      const peers = this.byTurn.get(row.key);
+      if (peers) {
+        peers.delete(row);
+        if (!peers.size) this.byTurn.delete(row.key);
+      }
+      this.invalidate(row.key);
+    }
+    bind(response, fromInitialList = false) {
+      this.remove(response);
+      let root = response.closest(TURN);
+      let key = null;
+      while (root && !(key = turnId(root, this.turns))) {
+        this.unresolved.add(response);
+        root = root.parentElement?.closest(TURN);
+      }
+      if (!key) this.unresolved.add(response);
+      const row = { response, root, key };
+      this.nodes.set(response, row);
+      if (key == null) return;
+      if (!this.byTurn.has(key)) this.byTurn.set(key, /* @__PURE__ */ new Set());
+      this.byTurn.get(key).add(row);
+      if (fromInitialList && this.mounts.has(key)) {
+        const chosen = this.mounts.get(key);
+        if (chosen ? response.compareDocumentPosition(chosen.response) & Node.DOCUMENT_POSITION_FOLLOWING : !visible(response)) return;
+      }
+      this.invalidate(key);
+    }
+    setSnapshot(snapshot) {
+      if (this.snapshot === snapshot) return;
+      this.snapshot = snapshot;
+      const previous = this.turns;
+      this.turns = new Map((snapshot.turns ?? []).map((turn) => [turn.id, turn]));
+      const rebind = /* @__PURE__ */ new Set();
+      let added = false;
+      for (const [id, turn] of this.turns) {
+        const prior = previous.get(id);
+        if (!prior) added = true;
+        if (!this.byTurn.has(id) && !this.groups.has(id)) continue;
+        if (prior?.completed !== turn.completed) this.invalidate(id);
+        else if (statsChanged(prior, turn)) this.dirty.add(id);
+      }
+      for (const id of previous.keys()) {
+        if (this.turns.has(id) || !this.byTurn.has(id) && !this.groups.has(id)) continue;
+        this.invalidate(id);
+        for (const row of this.byTurn.get(id) ?? []) rebind.add(row.response);
+      }
+      if (added) for (const response of this.unresolved) rebind.add(response);
+      for (const response of rebind) this.bind(response);
+    }
+    mountFor(key) {
+      if (this.mounts.has(key)) return this.mounts.get(key);
+      const rows = [...this.byTurn.get(key) ?? []];
+      if (rows.length > 1) rows.sort((a, b) => a.response.compareDocumentPosition(b.response) & Node.DOCUMENT_POSITION_FOLLOWING ? 1 : -1);
+      let mount = null;
+      for (const row of rows) {
+        const { root, response } = row;
+        if (!response.isConnected || !visible(response)) continue;
+        row.actions ??= [...response.querySelectorAll(ACTION)];
+        let actions = lastVisible(row.actions);
+        if (!actions) {
+          row.siblings ??= [...root.querySelectorAll(ACTION)].filter((node) => !node.closest(RESPONSE) && response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+          actions = lastVisible(row.siblings);
+        }
+        const parent = actions ?? response;
+        mount = { response, parent, inline: Boolean(actions), stillCurrent: () => this.mounts.get(key) === mount && root.contains(response) && root.contains(parent) && visible(response) && (!actions || visible(actions)) };
+        break;
+      }
+      this.mounts.set(key, mount);
+      return mount;
+    }
+    restore() {
+      for (const key of this.byTurn.keys()) this.dirty.add(key);
+      for (const key of this.groups.keys()) this.dirty.add(key);
+    }
+    changeFor(key) {
+      const turn = this.turns.get(key);
+      return { key, turn, mount: turn?.completed ? this.mountFor(key) : null };
+    }
+    *changes() {
+      if (!this.indexed) {
+        this.initialRows ??= Array.from(document.querySelectorAll(`[data-response-annotation-conversation="${this.id}" i]`));
+        while (this.initialRows.length) {
+          const response = this.initialRows.pop();
+          if (!this.nodes.has(response) && response.isConnected && import_protocol2.default.normalizeThreadId(response.dataset.responseAnnotationConversation) === this.id) {
+            this.bind(response, true);
+            this.owners.set(response, this);
+          }
+          const key = this.nodes.get(response)?.key;
+          yield this.dirty.delete(key) ? this.changeFor(key) : null;
+        }
+        this.initialRows = null;
+        this.indexed = true;
+      }
+      for (const key of this.dirty) {
+        this.dirty.delete(key);
+        yield this.changeFor(key);
+      }
+    }
+  };
+  var ReplyCache = class {
+    constructor() {
+      this.threads = /* @__PURE__ */ new Map();
+      this.owners = /* @__PURE__ */ new WeakMap();
+    }
+    select(id, snapshot) {
+      const thread = this.threads.get(id) ?? new ConversationReplies(id, this.owners);
+      this.threads.delete(id);
+      this.threads.set(id, thread);
+      if (this.threads.size > 6) this.drop(this.threads.values().next().value);
+      thread.setSnapshot(snapshot);
+      return thread;
+    }
+    drop(thread) {
+      for (const node of thread.nodes.keys()) this.owners.delete(node);
+      for (const group of thread.groups.values()) group.dispose();
+      this.threads.delete(thread.id);
+    }
+    visibility(scope) {
+      if (!scope.firstElementChild && !scope.matches(RESPONSE + "," + ACTION)) return;
+      for (const thread of this.threads.values()) {
+        for (const row of thread.nodes.values()) {
+          if (scope.contains(row.response) || row.root?.contains(scope) && (row.actions?.some((node) => scope.contains(node)) || row.siblings?.some((node) => scope.contains(node)))) {
+            thread.invalidate(row.key);
+          }
+        }
+      }
+    }
+    observe(records, active, dom) {
+      const changed = /* @__PURE__ */ new Set();
+      const actionScopes = /* @__PURE__ */ new Set();
+      const visibilityScopes = /* @__PURE__ */ new Set();
+      const collect = (node, target) => {
+        if (node.matches(RESPONSE) || this.owners.has(node)) changed.add(node);
+        if (node.matches(ACTION)) {
+          const scope = node.closest(RESPONSE) ?? target.closest(RESPONSE) ?? node.closest(TURN) ?? target.closest(TURN);
+          if (scope) actionScopes.add(scope);
+        }
+        if (node.matches(SHELL)) dom.invalidateShell();
+      };
+      for (const record of records) {
+        const target = record.target;
+        if (target.nodeType !== 1 || target.closest(OWN)) continue;
+        if (record.type === "attributes") {
+          switch (record.attributeName) {
+            case "data-response-annotation-conversation":
+              changed.add(target);
+              break;
+            case "data-content-search-turn-key":
+              if (target.matches(RESPONSE)) changed.add(target);
+              for (const node of target.querySelectorAll(RESPONSE)) changed.add(node);
+              break;
+            case "data-thread-find-composer":
+            case "data-app-navigation-rail":
+              dom.invalidateShell();
+              break;
+            case "hidden":
+            case "aria-hidden":
+            case "inert":
+              visibilityScopes.add(target);
+              break;
+          }
+          continue;
+        }
+        for (const nodes of [record.addedNodes, record.removedNodes]) for (const node of nodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches(OWN)) {
+            const key = node.dataset.cuTurn;
+            if (!node.isConnected && active?.groups.get(key)?.node === node) active.invalidate(key);
+            continue;
+          }
+          collect(node, target);
+          if (node.firstElementChild) for (const child of node.querySelectorAll(MARKERS2)) collect(child, target);
+        }
+      }
+      for (const scope of actionScopes) {
+        if (scope.matches(RESPONSE)) changed.add(scope);
+        else for (const response of scope.querySelectorAll(RESPONSE)) changed.add(response);
+      }
+      for (const response of changed) {
+        dom.responseChanged(response);
+        const old = this.owners.get(response);
+        const id = import_protocol2.default.normalizeThreadId(response.dataset.responseAnnotationConversation);
+        const next = response.isConnected ? this.threads.get(id) : null;
+        if (old && old !== next) {
+          old.remove(response);
+          this.owners.delete(response);
+        }
+        if (next) {
+          next.bind(response);
+          this.owners.set(response, next);
+        }
+      }
+      if (visibilityScopes.size) dom.fallbackThread = null;
+      for (const scope of visibilityScopes) this.visibility(scope);
+    }
+    dispose() {
+      for (const thread of this.threads.values()) this.drop(thread);
+    }
+  };
+
+  // src/ui/controller.mjs
+  var import_protocol3 = __toESM(require_protocol(), 1);
   var ConversationController = class {
     constructor(read, onChange) {
       this.read = read;
@@ -272,7 +686,7 @@
     }
     select(value) {
       if (this.disposed) return false;
-      const id = import_protocol.default.normalizeThreadId(value);
+      const id = import_protocol3.default.normalizeThreadId(value);
       if (id === this.threadId) return false;
       this.threadId = id;
       this.snapshot = this.history.get(id) ?? null;
@@ -332,7 +746,7 @@
   };
 
   // src/ui/quota-controller.mjs
-  var import_protocol2 = __toESM(require_protocol(), 1);
+  var import_protocol4 = __toESM(require_protocol(), 1);
   var import_quota_model = __toESM(require_quota_model(), 1);
   var { normalizeLimits } = import_quota_model.default;
   var QuotaController = class {
@@ -347,7 +761,7 @@
       this.inflight = false;
       this.disposed = false;
       this.listener = (_event, message) => this.receive(message);
-      ipc.on(import_protocol2.default.NATIVE_FROM_VIEW, this.listener);
+      ipc.on(import_protocol4.default.NATIVE_FROM_VIEW, this.listener);
     }
     get limits() {
       return this.native ?? this.fallback;
@@ -383,7 +797,7 @@
       this.lastPoll = this.now();
       this.inflight = true;
       try {
-        const snapshot = await this.ipc.invoke(import_protocol2.default.READ_CHANNEL, { threadId: null, quotaOnly: true });
+        const snapshot = await this.ipc.invoke(import_protocol4.default.READ_CHANNEL, { threadId: null, quotaOnly: true });
         if (this.disposed) return;
         const before = JSON.stringify(this.limits?.groups);
         this.useFallback(snapshot?.limits);
@@ -397,191 +811,9 @@
     dispose() {
       if (this.disposed) return;
       this.disposed = true;
-      this.ipc.removeListener(import_protocol2.default.NATIVE_FROM_VIEW, this.listener);
+      this.ipc.removeListener(import_protocol4.default.NATIVE_FROM_VIEW, this.listener);
       this.native = null;
       this.fallback = null;
-    }
-  };
-
-  // src/ui/dom.mjs
-  var import_protocol3 = __toESM(require_protocol(), 1);
-  var { normalizeThreadId } = import_protocol3.default;
-  var OWN = ".cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style";
-  var MARKERS = "[data-thread-find-composer],[data-thread-scroll-footer],[data-above-composer-conversation-id],[data-content-search-turn-key],[data-response-annotation-conversation],.turn-action-controls,[data-app-navigation-rail],[data-transition-phase],[data-chatgpt-composer]";
-  function structural(node) {
-    return node.nodeType === 1 && !node.closest(OWN) && (node.matches(MARKERS) || node.querySelector(MARKERS) !== null);
-  }
-  function visible(node) {
-    return node && node.closest('[aria-hidden="true"],[hidden],[inert]') == null && node.getClientRects().length > 0 && !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
-  }
-  function uniqueThread(nodes, attribute) {
-    const ids = new Set(nodes.map((node) => normalizeThreadId(node.getAttribute(attribute))).filter(Boolean));
-    return ids.size === 1 ? [...ids][0] : null;
-  }
-  function composerRoot(node) {
-    const footer = node.closest("[data-thread-scroll-footer]");
-    if (!footer) return node;
-    let parent;
-    while ((parent = node.parentElement?.closest("[data-thread-find-composer]")) && footer.contains(parent)) node = parent;
-    return node;
-  }
-  function turnId(root, turns) {
-    const key = root.getAttribute("data-content-search-turn-key") ?? "";
-    const candidates = [key, ...key.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi) ?? [], ...key.split(/[^\w-]+/)];
-    return candidates.find((candidate) => turns.has(candidate)) ?? null;
-  }
-  var CodexDOM = class {
-    constructor() {
-      this.footers = /* @__PURE__ */ new Set();
-      this.actions = /* @__PURE__ */ new Set();
-      this.visibilityNodes = /* @__PURE__ */ new Set();
-    }
-    watchVisibility(callback) {
-      this.visibilityObserver = new MutationObserver((records) => {
-        const normalize = (value, name) => name === "class" ? (value ?? "").split(/\s+/).filter((x) => x && !x.startsWith("cu-")).sort().join(" ") : (value ?? "").split(";").map((x) => x.trim()).filter((x) => /^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(";");
-        if (records.some((r) => normalize(r.oldValue, r.attributeName) !== normalize(r.target.getAttribute(r.attributeName), r.attributeName))) callback();
-      });
-    }
-    trackVisibility(nodes) {
-      const next = /* @__PURE__ */ new Set();
-      for (const node of nodes) for (let parent = node; parent; parent = parent.parentElement) next.add(parent);
-      if (next.size === this.visibilityNodes.size && [...next].every((node) => this.visibilityNodes.has(node))) return;
-      this.visibilityNodes = next;
-      this.visibilityObserver?.disconnect();
-      for (const node of next) this.visibilityObserver?.observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ["class", "style"] });
-    }
-    composer() {
-      const all = [...document.querySelectorAll("[data-thread-find-composer]")].filter((node) => !node.matches("button,input,textarea"));
-      this.trackVisibility(all);
-      const nodes = [...new Set(all.filter(visible).map(composerRoot))];
-      const footers = nodes.filter((node) => node.closest("[data-thread-scroll-footer]"));
-      const candidates = footers.length ? footers : nodes;
-      return candidates.find((node) => node.contains(document.activeElement)) ?? candidates.at(-1) ?? null;
-    }
-    thread(composer = this.composer()) {
-      for (const scope of [composer, composer?.closest("[data-thread-scroll-footer]")]) {
-        const portals = scope ? [...scope.querySelectorAll("[data-above-composer-conversation-id]")] : [];
-        if (portals.length) return uniqueThread(portals, "data-above-composer-conversation-id");
-      }
-      const container = composer?.closest(".thread-scroll-container");
-      if (composer && !container) return null;
-      const responses = [...(container ?? document).querySelectorAll("[data-response-annotation-conversation]")].filter(visible);
-      return uniqueThread(responses, "data-response-annotation-conversation");
-    }
-    chatMode(composer) {
-      return Boolean(composer?.matches("[data-chatgpt-composer]") || [...composer?.querySelectorAll("[data-chatgpt-composer]") ?? []].some(visible));
-    }
-    context() {
-      const composer = this.composer();
-      return { composer, id: this.thread(composer) };
-    }
-    *scanReplies(snapshot, id) {
-      const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map((turn) => [turn.id, turn]));
-      if (!turns.size || !normalizeThreadId(id)) return;
-      const seen = /* @__PURE__ */ new Set();
-      const responses = document.querySelectorAll(`[data-response-annotation-conversation="${id}" i]`);
-      for (let i = responses.length - 1; i >= 0; i--) {
-        const response = responses[i];
-        if (!response.isConnected || normalizeThreadId(response.getAttribute("data-response-annotation-conversation")) !== id) {
-          yield null;
-          continue;
-        }
-        let root = response.closest("[data-content-search-turn-key]");
-        let key = null;
-        while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest("[data-content-search-turn-key]");
-        const turn = turns.get(key);
-        if (!turn?.completed || seen.has(key) || !visible(response)) {
-          yield null;
-          continue;
-        }
-        seen.add(key);
-        const actions = [...response.querySelectorAll(".turn-action-controls")].filter(visible).at(-1) ?? [...root.querySelectorAll(".turn-action-controls")].filter((node) => visible(node) && !node.closest("[data-response-annotation-conversation]") && Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
-        const parent = actions ?? response;
-        const nativeKey = root.dataset.contentSearchTurnKey;
-        yield [key, {
-          turn,
-          parent,
-          inline: Boolean(actions),
-          stillCurrent: () => root.dataset.contentSearchTurnKey === nativeKey && normalizeThreadId(response.dataset.responseAnnotationConversation) === id && root.contains(response) && root.contains(parent) && visible(response) && (!actions || visible(actions))
-        }];
-      }
-    }
-    quotaMount() {
-      const rail = [...document.querySelectorAll("[data-app-navigation-rail]")].find(visible);
-      if (!rail) return null;
-      const buttons = [...rail.querySelectorAll('button,[role="button"]')].filter((node) => !node.closest(OWN));
-      const nativeQuota = buttons.find((node) => node.querySelector("[data-transition-phase]") && !node.closest('[hidden],[aria-hidden="true"],[inert]'));
-      if (nativeQuota) return { parent: nativeQuota.parentElement, before: nativeQuota };
-      let anchor = buttons.find((node) => /^(下载|Downloads?)(?:\b|$)|查看下载/i.test(node.getAttribute("aria-label") ?? node.getAttribute("title") ?? "")) ?? buttons.at(-1);
-      if (!anchor) return { parent: rail, before: null };
-      while (anchor.parentElement !== rail && anchor.parentElement && !/column/.test(getComputedStyle(anchor.parentElement).flexDirection)) anchor = anchor.parentElement;
-      return { parent: anchor.parentElement, before: anchor };
-    }
-    alignComposer(composer, remeasure = false) {
-      const footer = composer?.closest("[data-thread-scroll-footer]");
-      if (!footer || this.footers.has(footer) && !remeasure) return;
-      footer.classList.remove("cu-footer");
-      const padding = parseFloat(getComputedStyle(footer).paddingBottom) || 0;
-      const nativeAfter = footer.classList.contains("after:h-(--thread-composer-bottom-inset)") ? getComputedStyle(footer, "::after") : null;
-      const after = nativeAfter && nativeAfter.display !== "none" && nativeAfter.content !== "none" ? parseFloat(nativeAfter.height) || 0 : 0;
-      const inset = padding + after;
-      footer.style.setProperty("--cu-strip-height", `${30 + Math.max(0, inset - 8)}px`);
-      footer.classList.add("cu-footer");
-      this.footers.add(footer);
-    }
-    markActions(node) {
-      if (!node.classList.contains("cu-action-row")) node.classList.add("cu-action-row");
-      this.actions.add(node);
-    }
-    reconcile() {
-      for (const row of this.actions) {
-        if (row.isConnected && row.querySelector(".cu-turn")) continue;
-        row.classList.remove("cu-action-row");
-        this.actions.delete(row);
-      }
-      for (const footer of this.footers) {
-        if (footer.isConnected && footer.querySelector(".cu-strip")) continue;
-        footer.classList.remove("cu-footer");
-        footer.style.removeProperty("--cu-strip-height");
-        this.footers.delete(footer);
-      }
-    }
-    remountActions(record, threadId, replies) {
-      if (record.removedNodes.length !== 1 || record.addedNodes.length !== 1) return false;
-      const old = record.removedNodes[0], row = record.addedNodes[0];
-      if (!this.actions.has(old) || old.isConnected || !row.matches?.(".turn-action-controls")) return false;
-      const response = row.closest("[data-response-annotation-conversation]");
-      if (!response || normalizeThreadId(response.dataset.responseAnnotationConversation) !== threadId) return false;
-      const root = response.closest("[data-content-search-turn-key]");
-      const group = root && replies.get(turnId(root, replies));
-      if (!group || group.node.parentElement !== old || row.querySelector(".cu-turn") || !visible(row)) return false;
-      this.actions.delete(old);
-      old.classList.remove("cu-action-row");
-      this.markActions(row);
-      group.mount(row);
-      return true;
-    }
-    relevant(record) {
-      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
-      if (target?.closest(OWN)) return false;
-      if (record.type === "attributes") {
-        return !["hidden", "aria-hidden", "inert"].includes(record.attributeName) || structural(target);
-      }
-      const nodes = [...record.addedNodes, ...record.removedNodes];
-      if ([...record.removedNodes].some((node) => node.nodeType === 1 && node.matches(".cu-strip,.cu-turn") && !node.isConnected)) return true;
-      if (nodes.some(structural)) return true;
-      return target?.matches("[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]") && nodes.some((node) => node.nodeType === 1 && !node.matches(OWN));
-    }
-    dispose() {
-      this.visibilityObserver?.disconnect();
-      this.visibilityNodes.clear();
-      for (const footer of this.footers) {
-        footer.classList.remove("cu-footer");
-        footer.style.removeProperty("--cu-strip-height");
-      }
-      for (const row of this.actions) row.classList.remove("cu-action-row");
-      this.footers.clear();
-      this.actions.clear();
     }
   };
 
@@ -746,6 +978,7 @@
   var textMeasure = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   var glyphs = /* @__PURE__ */ new Map();
   var pendingAlignment = /* @__PURE__ */ new Set();
+  var measuredParents = /* @__PURE__ */ new WeakMap();
   var alignmentQueued = false;
   function metric(icon, text, kind, turnId2, onActivate) {
     const el = element("button", "cu-metric");
@@ -767,9 +1000,13 @@
     alignmentQueued = true;
     queueMicrotask(flushAlignment);
   }
+  function invalidateMetricLayout() {
+    measuredParents = /* @__PURE__ */ new WeakMap();
+  }
   function flushAlignment() {
     alignmentQueued = false;
-    const labels = [...pendingAlignment].filter((node) => node.isConnected).flatMap((node) => [...node.querySelectorAll(".cu-metric-label")]);
+    const containers = [...pendingAlignment].filter((node) => node.isConnected);
+    const labels = containers.flatMap((node) => [...node.querySelectorAll(".cu-metric-label")]);
     pendingAlignment.clear();
     const rows = labels.map((label) => {
       const row = label.parentElement, svg = row.querySelector("svg");
@@ -829,6 +1066,7 @@
       label.style.transform = `translateY(${shift}px)`;
       if (svg) svg.style.transform = `translateY(${iconShift}px)`;
     }
+    for (const node of containers) measuredParents.set(node, new WeakRef(node.parentElement));
   }
   var MetricGroup = class {
     constructor(node, onActivate, onRemove, animated = false) {
@@ -891,12 +1129,13 @@
       this.motion?.enter();
     }
     mount(parent, before = null) {
-      if (this.node.parentNode !== parent || this.node.nextSibling !== before) {
+      const moved = this.node.parentNode !== parent || this.node.nextSibling !== before;
+      if (moved) {
         const entering = !this.node.isConnected || this.node.parentNode !== parent;
         parent.insertBefore(this.node, before);
-        this.align();
         if (entering) this.motion?.enter();
       }
+      if (this.motion ? moved : measuredParents.get(this.node)?.deref() !== parent) this.align();
     }
     align() {
       alignMetrics(this.node);
@@ -1321,7 +1560,7 @@
 
   // src/ui/app.mjs
   var import_usage_model2 = __toESM(require_usage_model(), 1);
-  var import_protocol4 = __toESM(require_protocol(), 1);
+  var import_protocol5 = __toESM(require_protocol(), 1);
 
   // src/ui/styles.css
   var styles_default = '.cu-strip,.cu-turn{font-family:var(--font-sans,var(--font-sans-default,"Segoe UI",sans-serif));font-size:var(--text-sm,12px);font-weight:400;line-height:20px;color:var(--color-text-secondary,var(--app-color-text-secondary,#979b9f));font-variant-numeric:tabular-nums;user-select:none}\n.cu-footer:has(.cu-strip){padding-bottom:0!important}\n.cu-footer:has(.cu-strip)[class~="after:h-(--thread-composer-bottom-inset)"]::after{height:0!important}\n.cu-strip{display:flex;align-items:center;align-content:center;justify-content:center;gap:0 8px;flex-wrap:wrap;min-height:var(--cu-strip-height,30px);padding:0 6px;margin:0;flex-shrink:0}\n.cu-strip>.cu-metric,.cu-turn>.cu-metric{display:flex;align-items:center;gap:5px;box-sizing:border-box;height:calc(var(--spacing,4px)*6);margin:0;padding:0 6px;white-space:nowrap;font:inherit;line-height:20px;border:0;border-radius:var(--radius-md,6px);color:inherit;background:transparent;cursor:pointer;outline-offset:2px;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}\n.cu-metric:hover,.cu-metric[aria-expanded=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-metric:focus-visible{outline:2px solid var(--color-ring,#79acfe)}\n.cu-metric>.cu-metric-label{display:block;margin:0;padding:0;border:0;font:inherit;font-weight:400;line-height:20px;letter-spacing:normal}\n.cu-strip svg,.cu-turn svg,.cu-panel svg{display:block;width:14px;height:14px;overflow:visible;stroke:currentColor;fill:none;stroke-width:1.5;flex-shrink:0}\n.cu-turn{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:5px 0 12px;min-width:0;clear:both}\n.cu-turn-inline{padding:0;margin-inline-start:6px;clear:none}.cu-action-row{column-gap:2px}\n.cu-action-row>.opacity-0{opacity:1!important}\n.cu-turn>span{white-space:nowrap}.cu-turn [data-cu-usage]{display:inline-flex;align-items:center;gap:4px}\n[data-app-navigation-rail]:has(.cu-ring) button:has([data-transition-phase]){display:none!important}\n.cu-ring{width:36px;height:36px;min-height:36px;flex-shrink:0;display:flex;align-items:center;justify-content:center;align-self:center;margin:0;position:relative;color:var(--color-text-secondary,var(--app-color-text-secondary,#a5abb3))}\n.cu-ring button{box-sizing:border-box;border:0;margin:0;padding:2px;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;background:transparent;color:inherit;outline-offset:2px;transition:background-color .15s var(--ease-out,ease-out)}\n.cu-ring button:hover,.cu-ring button:focus-visible,.cu-ring button[aria-expanded=true]{background:var(--color-background-primary-ghost-hover,#ffffff12)}\n.cu-ring svg{display:block;width:28px;height:28px;overflow:visible;flex:none}.cu-ring .cu-diamond{fill:var(--color-usage-meter-symbol,currentColor)}.cu-ring circle{fill:none;stroke-width:2;transform:rotate(-90deg);transform-origin:center;stroke-linecap:round;transition:stroke-dashoffset .35s var(--ease-out,ease-out),stroke .2s}\n.cu-ring .cu-track{stroke:var(--color-usage-meter-track,color-mix(in srgb,currentColor 20%,transparent))}\n.cu-quota-panel,.cu-panel{position:fixed;z-index:2147483647;box-sizing:border-box;min-width:min(280px,calc(100vw - 24px));max-width:min(380px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;padding:16px;border-radius:var(--radius-2xl,16px);background:color-mix(in srgb,var(--color-surface-elevated-secondary,#262626) 90%,transparent);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8));box-shadow:0 0 0 var(--dropdown-overlay-ring-width,.5px) var(--color-border-overlay,#ffffff26),var(--shadow-dropdown-overlay,0 8px 32px #0005);backdrop-filter:blur(var(--blur-sm,8px));border:0;font:400 var(--text-base,14px)/20px var(--font-sans,var(--font-sans-default,"Segoe UI",sans-serif));font-variant-numeric:tabular-nums;user-select:text;opacity:0;transform:translateY(4px) scale(.98);transform-origin:bottom center;transition:opacity .16s var(--ease-out,ease-out),transform .16s var(--ease-out,ease-out)}\n.cu-quota-panel{transform:none;transition-property:opacity}\n.cu-quota-panel[data-state=open],.cu-panel[data-state=open]{opacity:1;transform:none}.cu-quota-panel[hidden],.cu-panel[hidden]{display:none}.cu-quota-panel[data-state=closed],.cu-panel[data-state=closed]{pointer-events:none}\n.cu-quota-panel strong,.cu-panel strong{font:inherit;font-weight:600}.cu-quota-panel p{margin:8px 0 0}.cu-muted,.cu-note{color:var(--color-text-secondary,#999)}.cu-quota-panel .cu-muted,.cu-note{font-size:var(--text-sm,12px)}.cu-quota-panel .cu-quota-detail+.cu-quota-detail{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:12px;padding-top:12px}\n.cu-panel-header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding-bottom:12px;margin-bottom:10px;border-bottom:1px solid var(--color-border-overlay,#ffffff26)}.cu-panel-heading{display:flex;align-items:center;gap:8px}.cu-panel-total{white-space:nowrap}.cu-stat-row{display:flex;align-items:baseline;justify-content:space-between;gap:24px;padding:4px 0}.cu-stat-label{color:var(--color-text-secondary,#999)}.cu-stat-value{text-align:right;overflow-wrap:anywhere}.cu-note{margin:10px 0 0;line-height:18px}.cu-context-track{height:5px;border-radius:99px;background:var(--color-background-primary-ghost-hover,#ffffff12);overflow:hidden;margin:4px 0 12px}.cu-context-fill{display:flex;height:100%;border-radius:inherit;overflow:hidden;transition:width .25s var(--ease-out,ease-out)}\n.cu-context-segment{display:block;flex:0 0 auto;height:100%;background:var(--cu-context-color);transition:width .25s var(--ease-out,ease-out)}.cu-context-uncached{--cu-context-color:var(--purple-400,#a78bfa)}.cu-context-cached{--cu-context-color:var(--blue-400,#60a5fa)}.cu-context-output{--cu-context-color:var(--green-400,#4ade80)}.cu-context-unknown{--cu-context-color:var(--color-text-tertiary,#878b93)}.cu-stat-row[data-cu-category]>.cu-stat-label{display:inline-flex;align-items:center;gap:8px}.cu-context-dot{display:inline-block;flex-shrink:0;width:8px;height:8px;border-radius:2px;background:var(--cu-context-color)}\n.cu-token-panel{font-size:var(--text-sm,12px);padding:14px}.cu-token-panel .cu-panel-header{gap:16px;padding-bottom:10px;margin-bottom:8px}.cu-model-views{display:flex;gap:4px;overflow-x:auto;max-width:100%;padding:0 0 8px;scrollbar-width:thin}.cu-model-view,.cu-model-summary{border:0;border-radius:var(--radius-md,6px);background:transparent;color:var(--color-text-secondary,#999);font:inherit;line-height:20px;cursor:pointer;transition:background-color .15s var(--ease-out,ease-out),color .15s var(--ease-out,ease-out)}.cu-model-view{flex:0 0 auto;padding:2px 7px;white-space:nowrap}.cu-model-view:hover,.cu-model-summary:hover,.cu-model-view[aria-pressed=true]{background:var(--color-background-primary-ghost-hover,#ffffff12);color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}.cu-model-view:focus-visible,.cu-model-summary:focus-visible{outline:2px solid var(--color-ring,#79acfe);outline-offset:-2px}.cu-model-list{border-top:1px solid var(--color-border-overlay,#ffffff26);margin-top:8px;padding-top:6px}.cu-model-summary{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:4px 6px;text-align:left}.cu-model-summary>span:first-child{min-width:0;overflow-wrap:anywhere}.cu-model-summary>span:last-child{white-space:nowrap;color:var(--color-text,var(--app-color-text-foreground,#e3e5e8))}\n@media(max-width:620px){.cu-strip{gap:2px 4px}.cu-turn{gap:2px}}\n@media(prefers-reduced-motion:reduce){.cu-metric,.cu-ring button,.cu-ring circle,.cu-quota-panel,.cu-panel,.cu-context-fill,.cu-context-segment,.cu-model-view,.cu-model-summary{transition:none}}\n';
@@ -1332,6 +1571,8 @@
       this.life = new Lifetime();
       this.dom = new CodexDOM();
       this.replies = /* @__PURE__ */ new Map();
+      this.replyCache = new ReplyCache();
+      this.sessionSpeeds = /* @__PURE__ */ new WeakMap();
       this.replyScan = new BackgroundScan();
       this.readTimer = null;
       this.renderTimer = null;
@@ -1347,10 +1588,10 @@
         if (this.controller.snapshot) this.controller.snapshot.eventDriven = message.watching !== false;
         if (document.visibilityState !== "hidden") this.refreshData();
       };
-      ipc.on(import_protocol4.default.CHANGE_CHANNEL, changed);
-      this.life.own(() => ipc.removeListener(import_protocol4.default.CHANGE_CHANNEL, changed));
+      ipc.on(import_protocol5.default.CHANGE_CHANNEL, changed);
+      this.life.own(() => ipc.removeListener(import_protocol5.default.CHANGE_CHANNEL, changed));
       this.controller = new ConversationController(
-        (id, knownRevision) => ipc.invoke(import_protocol4.default.READ_CHANNEL, { threadId: id, knownRevision }),
+        (id, knownRevision) => ipc.invoke(import_protocol5.default.READ_CHANNEL, { threadId: id, knownRevision }),
         (changed2, liveOnly) => {
           if (changed2) {
             this.details.close();
@@ -1393,8 +1634,7 @@
         this.replyScan.cancel();
         clearTimeout(this.readTimer);
         this.readTimer = null;
-        for (const group of this.replies.values()) group.dispose();
-        this.replies.clear();
+        this.leaveReplies();
       }
       this.render(context);
       if (document.visibilityState === "hidden") return;
@@ -1407,12 +1647,17 @@
         this.strip.message(id ? "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u7B49\u5F85\u672C\u5730\u4F1A\u8BDD\u6570\u636E" : "\u7528\u91CF\u7EDF\u8BA1 \xB7 \u5F00\u59CB\u5BF9\u8BDD\u540E\u663E\u793A");
         return;
       }
+      const last = snapshot.turns?.at(-1);
+      let speed = this.sessionSpeeds.get(snapshot);
+      if (!speed || speed.duration !== last?.durationMs) {
+        speed = { duration: last?.durationMs, label: speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? [])) };
+        this.sessionSpeeds.set(snapshot, speed);
+      }
       const items = [
-        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? []))}` },
+        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speed.label}` },
         { key: "tokens", icon: "token", kind: "tokens", text: `${fmt(snapshot.total.total_tokens)} tok \xB7 \u7F13\u5B58\u547D\u4E2D ${pct(snapshot.cacheHitPercent)}` },
         { key: "context", icon: "context", kind: "context", text: pct(snapshot.contextPercent) }
       ];
-      const last = snapshot.turns?.at(-1);
       if (last && !last.completed) items.push({ key: "live", icon: "speed", kind: "live", text: `\u5F53\u524D ${last.averageTps?.toFixed(1) ?? "\u2014"} tok/s`, live: true });
       this.strip.render(items);
     }
@@ -1442,11 +1687,17 @@
         this.strip.node.dataset.cuThread = context.id ?? "";
         this.renderStrip(snapshot, context.id);
       } else this.strip.unmount();
-      if (snapshot?.available) this.replyScan.request(() => this.renderReplies());
-      else {
+      if (snapshot?.available) {
+        const thread = this.replyCache.select(context.id, snapshot);
+        if (this.replyThread !== thread) {
+          this.replyThread = thread;
+          this.replies = thread.groups;
+          thread.restore();
+        }
+        if (!thread.indexed || thread.dirty.size) this.replyScan.request(() => this.renderReplies(thread));
+      } else {
         this.replyScan.cancel();
-        for (const group of this.replies.values()) group.dispose();
-        this.replies.clear();
+        this.leaveReplies();
       }
       this.quotaState.useFallback(snapshot?.limits);
       this.quotaMount = this.dom.quotaMount();
@@ -1454,7 +1705,16 @@
       this.details.update(snapshot);
       this.dom.reconcile();
     }
-    renderReply(threadId, id, mount, realign) {
+    leaveReplies() {
+      if (!this.replyThread) return;
+      for (const group of this.replies.values()) {
+        this.dom.setActionParent(group.node, null);
+        group.unmount();
+      }
+      this.replyThread = null;
+      this.replies = /* @__PURE__ */ new Map();
+    }
+    renderReply(threadId, id, mount, turn) {
       let group = this.replies.get(id);
       if (!group) {
         const node = element("div", "cu-turn");
@@ -1465,52 +1725,52 @@
         this.replies.set(id, group);
       }
       group.node.classList.toggle("cu-turn-inline", mount.inline);
-      if (mount.inline) this.dom.markActions(mount.parent);
+      this.dom.setActionParent(group.node, mount.inline ? mount.parent : null);
       group.mount(mount.parent);
-      const turn = mount.turn;
       group.render([
         { key: "tokens", icon: "token", kind: "tokens", turnId: id, text: `\u7528\u91CF ${fmt(turn.usage.total_tokens)} tok` },
         { key: "cache", kind: "tokens", turnId: id, text: `\u7F13\u5B58 ${pct(turn.cacheHitPercent)}` },
         { key: "speed", kind: "session", turnId: id, text: speedLabel(turn) }
       ]);
-      if (realign) group.align();
     }
-    *renderReplies() {
-      const threadId = this.controller.threadId;
-      const snapshot = this.controller.snapshot;
-      const realign = this.realignReplies;
-      const keep = /* @__PURE__ */ new Set();
-      this.realignReplies = false;
-      if (!snapshot?.available) return;
-      for (const entry of this.dom.scanReplies(snapshot, threadId)) {
-        if (this.life.disposed || document.visibilityState === "hidden" || this.controller.threadId !== threadId) return;
-        if (!entry) {
+    *renderReplies(thread) {
+      for (const change of thread.changes()) {
+        if (this.life.disposed || document.visibilityState === "hidden" || this.replyThread !== thread) return;
+        if (!change) {
           yield;
           continue;
         }
-        const [id, mount] = entry;
+        const { key, turn, mount } = change;
         yield (deferred) => {
-          if (!mount.parent.isConnected || deferred && !mount.stillCurrent()) return;
-          keep.add(id);
-          this.renderReply(threadId, id, mount, realign);
+          if (this.replyThread !== thread || thread.dirty.has(key)) return;
+          if (mount) {
+            if (mount.parent.isConnected && (!deferred || mount.stillCurrent()))
+              this.renderReply(thread.id, key, mount, turn);
+          } else {
+            const group = thread.groups.get(key);
+            if (group) {
+              this.dom.setActionParent(group.node, null);
+              if (turn?.completed && thread.byTurn.has(key)) group.unmount();
+              else {
+                group.dispose();
+                thread.groups.delete(key);
+              }
+            }
+          }
         };
       }
-      return () => {
-        for (const [id, group] of this.replies) {
-          if (!keep.has(id)) {
-            group.dispose();
-            this.replies.delete(id);
-          }
-        }
-        this.dom.reconcile();
-      };
+      return () => this.dom.reconcile();
     }
     align() {
+      invalidateMetricLayout();
       const composer = this.dom.composer();
       if (!this.dom.chatMode(composer)) this.dom.alignComposer(composer, true);
       this.strip.align();
-      this.realignReplies = true;
-      if (this.controller.snapshot?.available) this.replyScan.request(() => this.renderReplies());
+      if (this.replyThread) {
+        const thread = this.replyThread;
+        thread.restore();
+        this.replyScan.request(() => this.renderReplies(thread));
+      }
       this.details.position();
       this.quota.position();
     }
@@ -1519,8 +1779,13 @@
       this.started = true;
       document.head.append(this.style);
       document.documentElement.dataset.cuUi = "ready";
-      const reconcile = (urgent = false) => {
-        if (this.renderTimer) return;
+      const reconcile = (delay = 200) => {
+        const deadline = performance.now() + delay;
+        if (this.renderTimer !== null) {
+          if (this.renderDeadline <= deadline) return;
+          clearTimeout(this.renderTimer);
+        }
+        this.renderDeadline = deadline;
         this.renderTimer = setTimeout(() => {
           this.renderTimer = null;
           if (document.visibilityState === "hidden") return;
@@ -1529,23 +1794,34 @@
           else {
             this.render(context);
           }
-        }, urgent ? 80 : 200);
+        }, delay);
       };
-      this.dom.watchVisibility(() => reconcile(true));
+      this.dom.watchVisibility((scopes) => {
+        this.dom.fallbackThread = null;
+        for (const scope of scopes) this.replyCache.visibility(scope);
+        reconcile(0);
+      });
       const observer = new MutationObserver((records) => {
+        const revision = this.replyThread?.domRevision;
+        this.replyCache.observe(records, this.replyThread, this.dom);
         if (document.visibilityState === "hidden") return;
         let needsRender = false;
         for (const record of records) {
           if (this.dom.remountActions(record, this.controller.threadId, this.replies)) continue;
           needsRender ||= this.dom.relevant(record);
         }
-        if (needsRender) reconcile(records.some((record) => record.type === "attributes"));
+        if (needsRender || this.replyThread?.domRevision !== revision) {
+          const navigating = records.some((record) => record.attributeName === "data-above-composer-conversation-id" || record.type === "attributes" && this.dom.visibilityNodes.has(record.target));
+          reconcile(navigating ? 0 : records.some((record) => record.type === "attributes") ? 80 : 200);
+        }
       });
       observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: [
         "data-above-composer-conversation-id",
         "data-content-search-turn-key",
         "data-response-annotation-conversation",
         "data-chatgpt-composer",
+        "data-thread-find-composer",
+        "data-app-navigation-rail",
         "aria-hidden",
         "hidden",
         "inert"
@@ -1554,8 +1830,10 @@
       this.life.listen(window, "resize", () => this.align());
       this.life.listen(window, "focus", () => this.synchronize());
       this.life.listen(document, "visibilitychange", () => {
-        if (document.visibilityState !== "hidden") this.synchronize(this.dom.context(), true);
-        else {
+        if (document.visibilityState !== "hidden") {
+          this.replyThread?.restore();
+          this.synchronize(this.dom.context(), true);
+        } else {
           this.replyScan.cancel();
           clearTimeout(this.readTimer);
           this.readTimer = null;
@@ -1604,8 +1882,7 @@
       this.controller.dispose();
       this.quotaState.dispose();
       this.strip.dispose();
-      for (const group of this.replies.values()) group.dispose();
-      this.replies.clear();
+      this.replyCache.dispose();
       this.details.dispose();
       this.quota.dispose();
       this.dom.dispose();

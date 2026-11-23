@@ -1,7 +1,7 @@
 import protocol from '../protocol.cjs';
 
 const { normalizeThreadId } = protocol;
-const OWN = '.cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style';
+export const OWN = '.cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style';
 const MARKERS = '[data-thread-find-composer],[data-thread-scroll-footer],[data-above-composer-conversation-id],'+
   '[data-content-search-turn-key],[data-response-annotation-conversation],.turn-action-controls,'+
   '[data-app-navigation-rail],[data-transition-phase],[data-chatgpt-composer]';
@@ -30,7 +30,7 @@ function composerRoot(node) {
   return node;
 }
 
-function turnId(root, turns) {
+export function turnId(root, turns) {
   const key = root.getAttribute('data-content-search-turn-key') ?? '';
   const candidates = [key, ...(key.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi) ?? []), ...key.split(/[^\w-]+/)];
   return candidates.find(candidate => turns.has(candidate)) ?? null;
@@ -39,8 +39,20 @@ function turnId(root, turns) {
 export class CodexDOM {
   constructor() {
     this.footers = new Set();
-    this.actions = new Set();
+    this.actions = new Map();
+    this.actionParents = new WeakMap();
     this.visibilityNodes = new Set();
+  }
+  invalidateShell() {
+    this.composerNodes = null;
+    this.rails = null;
+    this.fallbackThread = null;
+  }
+  responseChanged(response) {
+    if (!this.fallbackResponses) return;
+    this.fallbackThread = null;
+    if (response.isConnected && response.hasAttribute('data-response-annotation-conversation')) this.fallbackResponses.add(response);
+    else this.fallbackResponses.delete(response);
   }
   watchVisibility(callback) {
     // Observe only composer ancestors, not every class/style mutation in streamed text.
@@ -48,7 +60,8 @@ export class CodexDOM {
       const normalize = (value, name) => name === 'class'
         ? (value ?? '').split(/\s+/).filter(x => x && !x.startsWith('cu-')).sort().join(' ')
         : (value ?? '').split(';').map(x=>x.trim()).filter(x=>/^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(';');
-      if(records.some(r => normalize(r.oldValue,r.attributeName) !== normalize(r.target.getAttribute(r.attributeName),r.attributeName)))callback();
+      const changed = records.filter(r => normalize(r.oldValue,r.attributeName) !== normalize(r.target.getAttribute(r.attributeName),r.attributeName));
+      if (changed.length) callback(new Set(changed.map(r => r.target)));
     });
   }
   trackVisibility(nodes) {
@@ -60,8 +73,11 @@ export class CodexDOM {
     for(const node of next)this.visibilityObserver?.observe(node,{attributes:true,attributeOldValue:true,attributeFilter:['class','style']});
   }
   composer() {
-    const all = [...document.querySelectorAll('[data-thread-find-composer]')].filter(node=>!node.matches('button,input,textarea'));
-    this.trackVisibility(all);
+    if (!this.composerNodes) {
+      this.composerNodes = [...document.querySelectorAll('[data-thread-find-composer]')].filter(node=>!node.matches('button,input,textarea'));
+      this.trackVisibility(this.composerNodes);
+    }
+    const all = this.composerNodes;
     const nodes = [...new Set(all.filter(visible).map(composerRoot))];
     const footers = nodes.filter(node => node.closest('[data-thread-scroll-footer]'));
     const candidates = footers.length ? footers : nodes;
@@ -75,8 +91,13 @@ export class CodexDOM {
     }
     const container = composer?.closest('.thread-scroll-container');
     if (composer && !container) return null;
-    const responses = [...(container ?? document).querySelectorAll('[data-response-annotation-conversation]')].filter(visible);
-    return uniqueThread(responses, 'data-response-annotation-conversation');
+    const scope = container ?? document;
+    if (this.fallbackThread?.scope === scope) return this.fallbackThread.id;
+    this.fallbackResponses ??= new Set(document.querySelectorAll('[data-response-annotation-conversation]'));
+    const responses = [...this.fallbackResponses].filter(node => (scope === document || scope.contains(node)) && visible(node));
+    const id = uniqueThread(responses, 'data-response-annotation-conversation');
+    this.fallbackThread = {scope, id};
+    return id;
   }
   chatMode(composer) {
     return Boolean(composer?.matches('[data-chatgpt-composer]') ||
@@ -86,37 +107,9 @@ export class CodexDOM {
     const composer=this.composer();
     return {composer,id:this.thread(composer)};
   }
-  *scanReplies(snapshot, id) {
-    const turns = new Map((snapshot?.threadId === id ? snapshot.turns ?? [] : []).map(turn => [turn.id, turn]));
-    if (!turns.size || !normalizeThreadId(id)) return;
-    const seen = new Set();
-    const responses = document.querySelectorAll(`[data-response-annotation-conversation="${id}" i]`);
-    for (let i=responses.length-1;i>=0;i--) {
-      const response=responses[i];
-      if (!response.isConnected || normalizeThreadId(response.getAttribute('data-response-annotation-conversation')) !== id) {yield null;continue;}
-      let root = response.closest('[data-content-search-turn-key]');
-      let key = null;
-      while (root && !(key = turnId(root, turns))) root = root.parentElement?.closest('[data-content-search-turn-key]');
-      const turn = turns.get(key);
-      if (!turn?.completed || seen.has(key) || !visible(response)) {yield null;continue;}
-      seen.add(key);
-      const actions = [...response.querySelectorAll('.turn-action-controls')].filter(visible).at(-1) ??
-        [...root.querySelectorAll('.turn-action-controls')].filter(node => visible(node) &&
-          !node.closest('[data-response-annotation-conversation]') &&
-          Boolean(response.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
-      // 同一轮只保留最后一条原生回复的操作栏；操作栏稍后出现时会移动同一个统计节点。
-      const parent = actions ?? response;
-      const nativeKey = root.dataset.contentSearchTurnKey;
-      yield [key, { turn, parent, inline: Boolean(actions), stillCurrent: () =>
-        root.dataset.contentSearchTurnKey === nativeKey &&
-        normalizeThreadId(response.dataset.responseAnnotationConversation) === id &&
-        root.contains(response) && root.contains(parent) &&
-        visible(response) && (!actions || visible(actions))
-      }];
-    }
-  }
   quotaMount() {
-    const rail = [...document.querySelectorAll('[data-app-navigation-rail]')].find(visible);
+    this.rails ??= [...document.querySelectorAll('[data-app-navigation-rail]')];
+    const rail = this.rails.find(visible);
     if (!rail) return null;
     const buttons = [...rail.querySelectorAll('button,[role="button"]')].filter(node => !node.closest(OWN));
     const nativeQuota = buttons.find(node => node.querySelector('[data-transition-phase]') &&
@@ -141,16 +134,19 @@ export class CodexDOM {
     footer.classList.add('cu-footer');
     this.footers.add(footer);
   }
-  markActions(node) {
-    if (!node.classList.contains('cu-action-row')) node.classList.add('cu-action-row');
-    this.actions.add(node);
+  setActionParent(stats, row) {
+    const old = this.actionParents.get(stats);
+    if (old && old !== row && this.actions.get(old) === stats) {
+      old.classList.remove('cu-action-row');
+      this.actions.delete(old);
+    }
+    if (row) {
+      if (!row.classList.contains('cu-action-row')) row.classList.add('cu-action-row');
+      this.actions.set(row, stats);
+      this.actionParents.set(stats, row);
+    } else this.actionParents.delete(stats);
   }
   reconcile() {
-    for (const row of this.actions) {
-      if (row.isConnected && row.querySelector('.cu-turn')) continue;
-      row.classList.remove('cu-action-row');
-      this.actions.delete(row);
-    }
     for (const footer of this.footers) {
       if (footer.isConnected && footer.querySelector('.cu-strip')) continue;
       footer.classList.remove('cu-footer');
@@ -167,9 +163,7 @@ export class CodexDOM {
     const root = response.closest('[data-content-search-turn-key]');
     const group = root && replies.get(turnId(root, replies));
     if (!group || group.node.parentElement !== old || row.querySelector('.cu-turn') || !visible(row)) return false;
-    this.actions.delete(old);
-    old.classList.remove('cu-action-row');
-    this.markActions(row);
+    this.setActionParent(group.node, row);
     group.mount(row);
     return true;
   }
@@ -193,7 +187,7 @@ export class CodexDOM {
       footer.classList.remove('cu-footer');
       footer.style.removeProperty('--cu-strip-height');
     }
-    for (const row of this.actions) row.classList.remove('cu-action-row');
+    for (const row of this.actions.keys()) row.classList.remove('cu-action-row');
     this.footers.clear();
     this.actions.clear();
   }

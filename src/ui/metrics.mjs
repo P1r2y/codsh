@@ -3,6 +3,7 @@ import { MetricMotion } from './motion.mjs';
 
 const textMeasure = document.createElement('canvas').getContext('2d', {willReadFrequently:true});
 const glyphs = new Map(), pendingAlignment = new Set();
+let measuredParents = new WeakMap();
 let alignmentQueued = false;
 
 function metric(icon, text, kind, turnId, onActivate) {
@@ -22,9 +23,14 @@ export function alignMetrics(container) {
   queueMicrotask(flushAlignment);
 }
 
+export function invalidateMetricLayout() {
+  measuredParents = new WeakMap();
+}
+
 function flushAlignment() {
   alignmentQueued=false;
-  const labels=[...pendingAlignment].filter(node=>node.isConnected).flatMap(node=>[...node.querySelectorAll('.cu-metric-label')]);
+  const containers=[...pendingAlignment].filter(node=>node.isConnected);
+  const labels=containers.flatMap(node=>[...node.querySelectorAll('.cu-metric-label')]);
   pendingAlignment.clear();
   // Write once, measure all rows, then apply offsets: no layout flush per label.
   const rows=labels.map(label=>{
@@ -74,6 +80,7 @@ function flushAlignment() {
     marker.remove();label.style.transform=`translateY(${shift}px)`;
     if(svg)svg.style.transform=`translateY(${iconShift}px)`;
   }
+  for (const node of containers) measuredParents.set(node, new WeakRef(node.parentElement));
 }
 
 export class MetricGroup {
@@ -127,12 +134,13 @@ export class MetricGroup {
     this.motion?.enter();
   }
   mount(parent, before = null) {
-    if (this.node.parentNode !== parent || this.node.nextSibling !== before) {
+    const moved = this.node.parentNode !== parent || this.node.nextSibling !== before;
+    if (moved) {
       const entering = !this.node.isConnected || this.node.parentNode !== parent;
       parent.insertBefore(this.node, before);
-      this.align();
       if (entering) this.motion?.enter();
     }
+    if (this.motion ? moved : measuredParents.get(this.node)?.deref() !== parent) this.align();
   }
   align() { alignMetrics(this.node); }
   unmount() { this.onRemove(this.node); this.motion?.cancel(); this.node.remove(); }

@@ -49,6 +49,27 @@ async function selfTest() {
     const snapshots=new Map([[fixture.snapshot.threadId,fixture.snapshot]]),responseDelays=new Map();
     let pluginEnabled=true;
     let pluginCode=fs.readFileSync(process.env.CODEX_USAGE_UI_TEST_BUNDLE??path.join(__dirname,'../dist/usage-preload.cjs'),'utf8');
+    if (process.env.CODEX_USAGE_UI_TEST_CASE === 'retained-cache') pluginCode = `(()=>{
+      let counts = null;
+      const queryDocument = Document.prototype.querySelectorAll, queryElement = Element.prototype.querySelectorAll;
+      Document.prototype.querySelectorAll = function(selector) {
+        if (counts && selector.includes('data-response-annotation-conversation')) counts.history++;
+        return queryDocument.call(this, selector);
+      };
+      Element.prototype.querySelectorAll = function(selector) {
+        if (counts && selector === '.turn-action-controls') counts.actions++;
+        return queryElement.call(this, selector);
+      };
+      const bounds = Element.prototype.getBoundingClientRect;
+      Element.prototype.getBoundingClientRect = function() {
+        if (counts && this.classList.contains('cu-metric-label') && this.closest('.cu-turn')) counts.measuredLabels++;
+        return bounds.call(this);
+      };
+      document.addEventListener('count-cache-start', () => { counts = {history:0, actions:0, measuredLabels:0}; });
+      document.addEventListener('count-cache-read', () => {
+        document.documentElement.dataset.cacheCounts = JSON.stringify(counts); counts = null;
+      });
+    })();\n` + pluginCode;
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance')pluginCode=`(()=>{
       let active=false,scans=0,layouts=0;
       const query=Document.prototype.querySelectorAll,rects=Element.prototype.getClientRects;
@@ -81,6 +102,11 @@ async function selfTest() {
     },100);publishing.unref();
     await win.loadFile(path.join(__dirname,'fixture.html'));
     await new Promise(resolve=>setTimeout(resolve,2200));
+    if (process.env.CODEX_USAGE_UI_TEST_CASE === 'retained-cache') {
+      const report = await require('./ui-retained-cache.cjs')(win, snapshots, fixture);
+      write({ok:Object.values(report.checks).every(Boolean), ...report});
+      win.destroy(); app.exit(0); return;
+    }
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='pacing') {
       const report=await pacingPresentation(win,fixture.snapshot,readTimes);
       write({ok:Object.values(report.checks).every(Boolean),...report});win.destroy();app.exit(0);return;

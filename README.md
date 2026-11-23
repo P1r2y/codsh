@@ -32,6 +32,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installation 'St
 
 历史统计缓存在项目 `.codex/codsh-usage-cache.json`，不含正文或系统提示词；只读取新增日志。缓存由独立线程处理，内存最多保留 4 个项目、32 MiB 内容；单文件上限 16 MiB。日志变化触发刷新，隐藏窗口暂停；缓存无效或项目不可写时回读原日志。
 
+每个窗口在内存中保留最近 6 个对话的回复位置和统计按钮。切回仍保留的页面时复用这些结果。新增、替换或移除回复时，插件只更新受影响的行。
+
 ```powershell
 & (Join-Path $installation 'Disable-UsagePlugin.ps1') # 停用
 & (Join-Path $installation 'Enable-UsagePlugin.ps1')  # 启用
