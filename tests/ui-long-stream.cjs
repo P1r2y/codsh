@@ -3,10 +3,37 @@
 // Count only queries issued by the plugin's isolated world, inside generated tool output.
 const instrumentation = `(()=>{
   let scans = 0;
+  let navigation = null;
+  const NativeObserver = MutationObserver;
+  window.MutationObserver = class extends NativeObserver {
+    constructor(callback) {
+      super((records, observer) => {
+        if (!navigation) return callback(records, observer);
+        const start = performance.now();
+        try { return callback(records, observer); }
+        finally {
+          const elapsed = performance.now()-start;
+          navigation.observerMs += elapsed;
+          navigation.maxObserverMs = Math.max(navigation.maxObserverMs, elapsed);
+        }
+      });
+    }
+  };
+  document.addEventListener('start-history-mount', () => {
+    navigation = {turnQueries:0, listQueries:0, observerMs:0, maxObserverMs:0};
+  });
+  document.addEventListener('read-history-mount', () => {
+    document.documentElement.dataset.historyMount = JSON.stringify(navigation);
+    navigation = null;
+  });
   for (const method of ['querySelector','querySelectorAll']) {
     const native = Element.prototype[method];
     Element.prototype[method] = function(selector) {
       if (selector.includes('data-response-annotation-conversation') && this.closest('[data-fixture-output]')) scans++;
+      if (navigation && selector.includes('data-response-annotation-conversation')) {
+        if (this.matches('[data-content-search-turn-key]')) navigation.turnQueries++;
+        if (this.matches('main.chat')) navigation.listQueries++;
+      }
       return native.call(this, selector);
     };
   }
@@ -50,6 +77,7 @@ async function longStream(win, snapshots, fixture, enabled) {
       if (${toolHeavy}) for(let j=0;j<(i===${count-1}?2:24);j++) row.prepend(card.cloneNode(true));
       rows.push(row); fragment.append(row);
     }
+    document.dispatchEvent(new Event('start-history-mount'));
     main.append(fragment);
     const last=rows.at(-1), text=last.querySelector('p'), tool=document.createElement('div');
     last.dataset.contentSearchTurnKey=${JSON.stringify(liveId)};
@@ -66,6 +94,10 @@ async function longStream(win, snapshots, fixture, enabled) {
     scroller.scrollTop=scroller.scrollHeight;
     document.querySelector('[data-above-composer-conversation-id]').setAttribute('data-above-composer-conversation-id',${JSON.stringify(thread)});
   })()`);
+  const navigation=await page(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    document.dispatchEvent(new Event('read-history-mount'));
+    resolve(JSON.parse(document.documentElement.dataset.historyMount || 'null'));
+  })))`);
   const active = !enabled || await waitFor(`document.querySelector('.cu-strip')?.dataset.cuThread===${JSON.stringify(thread)} && !!document.querySelector('[data-cu-live]')`);
   const firstVisible=!enabled || await waitFor('streamFixture.seen('+ (count-2) +')',4500);
   await pause(350);
@@ -93,8 +125,9 @@ async function longStream(win, snapshots, fixture, enabled) {
     const finished=!enabled || await waitFor("streamFixture.rows.at(-1).querySelector('[data-fixture-final] .turn-action-controls .cu-turn')",7500);
     const errors=await page('window.fixtureErrors.length');
     const sample={layoutCount:after.LayoutCount-before.LayoutCount,taskMs:Math.round(1000*(after.TaskDuration-before.TaskDuration))};
-    return {count,toolHeavy,enabled,stream,readsOlder,withOlder,finished,sample,checks:{
-      active,firstVisible,streamSkipsOutput:stream.scans===0,backgroundQuiet:stream.distant===0,
+    return {count,toolHeavy,enabled,navigation,stream,readsOlder,withOlder,finished,sample,checks:{
+      active,firstVisible,batchedHistoryMount:!enabled || navigation?.listQueries===1 && navigation.turnQueries<12,
+      streamSkipsOutput:stream.scans===0,backgroundQuiet:stream.distant===0,
       limited:stream.after<40&&withOlder<80,readsOlder,finished,noErrors:errors===0
     }};
   } finally {dbg.detach();}

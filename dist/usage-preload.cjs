@@ -1,4 +1,4 @@
-// codsh-source-sha256:410252d499a808f6cd5f6e69c94b187f069993407a9e4cea609c1b154a1edf7e
+// codsh-source-sha256:ae57d7ccaada79e36566bc78e23a724b61f0a8b9ba9716321bfddc99cec8ee0e
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -452,6 +452,9 @@
   function lastVisible(nodes) {
     return nodes.findLast(visible);
   }
+  function isCompleteTurnList(nodes, parent) {
+    return nodes.length >= 2 && nodes.length === parent.childElementCount && !parent.closest(TURN + "," + RESPONSE) && Array.prototype.every.call(nodes, (node) => node.parentElement === parent && node.matches?.(TURN));
+  }
   function statsChanged(previous, next) {
     return previous?.usage?.total_tokens !== next?.usage?.total_tokens || previous?.cacheHitPercent !== next?.cacheHitPercent || previous?.estimatedGenerationTps !== next?.estimatedGenerationTps || previous?.averageTps !== next?.averageTps;
   }
@@ -726,13 +729,21 @@
       const changed = /* @__PURE__ */ new Set();
       const actionScopes = /* @__PURE__ */ new Set();
       const visibilityScopes = /* @__PURE__ */ new Set();
-      const collect = (node, target) => {
+      const subtrees = /* @__PURE__ */ new Map();
+      const markersIn = (root) => {
+        if (!subtrees.has(root)) subtrees.set(root, root.querySelectorAll(MARKERS2));
+        return subtrees.get(root);
+      };
+      const collectReplyAndShell = (node) => {
         if (node.matches(RESPONSE) || this.owners.has(node)) changed.add(node);
+        if (node.matches(SHELL)) dom.invalidateShell();
+      };
+      const collect = (node, target) => {
+        collectReplyAndShell(node);
         if (node.matches(ACTION)) {
           const scope = node.closest(RESPONSE) ?? target.closest(RESPONSE) ?? node.closest(TURN) ?? target.closest(TURN);
           if (scope) actionScopes.add(scope);
         }
-        if (node.matches(SHELL)) dom.invalidateShell();
       };
       for (const record of records) {
         const target = record.target;
@@ -758,15 +769,22 @@
           }
           continue;
         }
-        for (const nodes of [record.addedNodes, record.removedNodes]) for (const node of nodes) {
-          if (node.nodeType !== 1) continue;
-          if (node.matches(OWN)) {
-            const key = node.dataset.cuTurn;
-            if (!node.isConnected && active?.groups.get(key)?.node === node) active.invalidate(key);
+        for (const nodes of [record.addedNodes, record.removedNodes]) {
+          if (nodes === record.addedNodes && isCompleteTurnList(nodes, target)) {
+            for (const node of nodes) if (this.owners.has(node)) changed.add(node);
+            for (const node of markersIn(target)) collectReplyAndShell(node);
             continue;
           }
-          collect(node, target);
-          if (node.firstElementChild) for (const child of node.querySelectorAll(MARKERS2)) collect(child, target);
+          for (const node of nodes) {
+            if (node.nodeType !== 1) continue;
+            if (node.matches(OWN)) {
+              const key = node.dataset.cuTurn;
+              if (!node.isConnected && active?.groups.get(key)?.node === node) active.invalidate(key);
+              continue;
+            }
+            collect(node, target);
+            if (node.firstElementChild) for (const child of markersIn(node)) collect(child, target);
+          }
         }
       }
       for (const scope of actionScopes) {

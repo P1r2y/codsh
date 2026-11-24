@@ -12,6 +12,12 @@ function lastVisible(nodes) {
   return nodes.findLast(visible);
 }
 
+function isCompleteTurnList(nodes, parent) {
+  return nodes.length >= 2 && nodes.length === parent.childElementCount &&
+    !parent.closest(TURN + ',' + RESPONSE) &&
+    Array.prototype.every.call(nodes, node => node.parentElement === parent && node.matches?.(TURN));
+}
+
 function statsChanged(previous, next) {
   return previous?.usage?.total_tokens !== next?.usage?.total_tokens ||
     previous?.cacheHitPercent !== next?.cacheHitPercent ||
@@ -318,13 +324,22 @@ export class ReplyCache {
     const changed = new Set();
     const actionScopes = new Set();
     const visibilityScopes = new Set();
-    const collect = (node, target) => {
+    // Moved panes occur in both removal and insertion records. Both see the same final DOM.
+    const subtrees = new Map();
+    const markersIn = root => {
+      if (!subtrees.has(root)) subtrees.set(root, root.querySelectorAll(MARKERS));
+      return subtrees.get(root);
+    };
+    const collectReplyAndShell = node => {
       if (node.matches(RESPONSE) || this.owners.has(node)) changed.add(node);
+      if (node.matches(SHELL)) dom.invalidateShell();
+    };
+    const collect = (node, target) => {
+      collectReplyAndShell(node);
       if (node.matches(ACTION)) {
         const scope = node.closest(RESPONSE) ?? target.closest(RESPONSE) ?? node.closest(TURN) ?? target.closest(TURN);
         if (scope) actionScopes.add(scope);
       }
-      if (node.matches(SHELL)) dom.invalidateShell();
     };
     for (const record of records) {
       const target = record.target;
@@ -341,15 +356,24 @@ export class ReplyCache {
         }
         continue;
       }
-      for (const nodes of [record.addedNodes, record.removedNodes]) for (const node of nodes) {
-        if (node.nodeType !== 1) continue;
-        if (node.matches(OWN)) {
-          const key = node.dataset.cuTurn;
-          if (!node.isConnected && active?.groups.get(key)?.node === node) active.invalidate(key);
+      for (const nodes of [record.addedNodes, record.removedNodes]) {
+        if (nodes === record.addedNodes && isCompleteTurnList(nodes, target)) {
+          // Each new action bar belongs to one of these turns. Binding its reply
+          // already invalidates its mount, so no tool or action subtree needs a separate search.
+          for (const node of nodes) if (this.owners.has(node)) changed.add(node);
+          for (const node of markersIn(target)) collectReplyAndShell(node);
           continue;
         }
-        collect(node, target);
-        if (node.firstElementChild) for (const child of node.querySelectorAll(MARKERS)) collect(child, target);
+        for (const node of nodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches(OWN)) {
+            const key = node.dataset.cuTurn;
+            if (!node.isConnected && active?.groups.get(key)?.node === node) active.invalidate(key);
+            continue;
+          }
+          collect(node, target);
+          if (node.firstElementChild) for (const child of markersIn(node)) collect(child, target);
+        }
       }
     }
     for (const scope of actionScopes) {
