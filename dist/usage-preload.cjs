@@ -1,4 +1,4 @@
-// codsh-source-sha256:d05ccf1b9d3fbaff3280f8cb123151909f0fb0c7bc976ecab5d6c2c081faeefa
+// codsh-source-sha256:410252d499a808f6cd5f6e69c94b187f069993407a9e4cea609c1b154a1edf7e
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -186,15 +186,22 @@
       this.requestIdle = globalThis.requestIdleCallback?.bind(globalThis) ?? ((fn) => setTimeout(() => fn({ didTimeout: false, timeRemaining: () => 50 }), 0));
       this.cancelIdle = globalThis.cancelIdleCallback?.bind(globalThis) ?? clearTimeout;
     }
-    request(factory) {
+    request(factory, visible2 = false) {
       if (this.disposed) return;
       this.pending = factory;
-      if (this.timer === null && this.idle === null) this.plan(Math.max(0, this.interval - (this.now() - this.lastStarted)));
+      if (visible2 && !this.urgent) {
+        this.urgent = true;
+        clearTimeout(this.timer);
+        if (this.idle !== null) this.cancelIdle(this.idle);
+        this.idle = null;
+        this.plan(0);
+      } else if (this.timer === null && this.idle === null) this.plan(Math.max(0, this.interval - (this.now() - this.lastStarted)));
     }
     plan(delay) {
       this.timer = setTimeout(() => {
         this.timer = null;
-        if (this.lastStarted === -Infinity) {
+        if (this.lastStarted === -Infinity || this.urgent) {
+          this.urgent = false;
           this.run({ didTimeout: false, timeRemaining: () => this.budgetMs });
           return;
         }
@@ -240,6 +247,7 @@
       else if (this.pending) this.plan(Math.max(this.gap, this.interval - (this.now() - this.lastStarted)));
     }
     cancel() {
+      this.urgent = false;
       clearTimeout(this.timer);
       if (this.idle !== null) this.cancelIdle(this.idle);
       this.timer = null;
@@ -283,6 +291,7 @@
   }
   function turnId(root, turns) {
     const key = root.getAttribute("data-content-search-turn-key") ?? "";
+    if (turns.has(key)) return key;
     const candidates = [key, ...key.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi) ?? [], ...key.split(/[^\w-]+/)];
     return candidates.find((candidate) => turns.has(candidate)) ?? null;
   }
@@ -439,6 +448,7 @@
   var ACTION = ".turn-action-controls";
   var SHELL = "[data-thread-find-composer],[data-app-navigation-rail]";
   var MARKERS2 = [RESPONSE, ACTION, SHELL].join(",");
+  var VIEWPORT_HISTORY_SIZE = 96;
   function lastVisible(nodes) {
     return nodes.findLast(visible);
   }
@@ -446,9 +456,12 @@
     return previous?.usage?.total_tokens !== next?.usage?.total_tokens || previous?.cacheHitPercent !== next?.cacheHitPercent || previous?.estimatedGenerationTps !== next?.estimatedGenerationTps || previous?.averageTps !== next?.averageTps;
   }
   var ConversationReplies = class {
-    constructor(id, owners) {
+    constructor(id, owners, onVisible) {
       this.id = id;
       this.owners = owners;
+      this.onVisible = onVisible;
+      this.nearby = /* @__PURE__ */ new Set();
+      this.streamRoots = /* @__PURE__ */ new Set();
       this.indexed = false;
       this.nodes = /* @__PURE__ */ new Map();
       this.byTurn = /* @__PURE__ */ new Map();
@@ -459,15 +472,48 @@
       this.dirty = /* @__PURE__ */ new Set();
       this.domRevision = 0;
     }
+    watchViewport() {
+      if (this.viewport || typeof IntersectionObserver !== "function") return;
+      this.viewport = new IntersectionObserver((entries) => {
+        let changed = false;
+        for (const entry of entries) {
+          const row = this.nodes.get(entry.target);
+          if (!row) continue;
+          if (!entry.isIntersecting) {
+            this.nearby.delete(entry.target);
+            continue;
+          }
+          if (this.nearby.has(entry.target)) continue;
+          this.nearby.add(entry.target);
+          if (row.key != null && this.turns.get(row.key)?.completed) {
+            this.invalidate(row.key);
+            changed = true;
+          }
+        }
+        if (changed) this.onVisible(this);
+      }, { rootMargin: "400px 0px", scrollMargin: "400px 0px" });
+      for (const response of this.nodes.keys()) this.viewport.observe(response);
+    }
+    nearTurn(key) {
+      if (!this.viewport) return true;
+      for (const response of this.nearby) if (this.nodes.get(response)?.key === key) return true;
+      return false;
+    }
     invalidate(key) {
       if (key == null) return;
       this.mounts.delete(key);
+      if (!this.groups.has(key) && !this.nearTurn(key)) return;
       this.dirty.add(key);
       this.domRevision++;
     }
-    remove(response) {
+    remove(response, forget = true) {
       const row = this.nodes.get(response);
       if (!row) return;
+      if (forget) {
+        this.viewport?.unobserve(response);
+        this.nearby.delete(response);
+        if (row.root && !row.root.isConnected) this.streamRoots.delete(row.root);
+      }
       this.nodes.delete(response);
       this.unresolved.delete(response);
       const peers = this.byTurn.get(row.key);
@@ -478,7 +524,8 @@
       this.invalidate(row.key);
     }
     bind(response, fromInitialList = false) {
-      this.remove(response);
+      const known = this.nodes.has(response);
+      this.remove(response, false);
       let root = response.closest(TURN);
       let key = null;
       while (root && !(key = turnId(root, this.turns))) {
@@ -488,11 +535,13 @@
       if (!key) this.unresolved.add(response);
       const row = { response, root, key };
       this.nodes.set(response, row);
+      if (!known) this.viewport?.observe(response);
       if (key == null) return;
       if (!this.byTurn.has(key)) this.byTurn.set(key, /* @__PURE__ */ new Set());
       this.byTurn.get(key).add(row);
       if (fromInitialList && this.mounts.has(key)) {
         const chosen = this.mounts.get(key);
+        if (!chosen && this.viewport && !this.nearby.has(response)) return;
         if (chosen ? response.compareDocumentPosition(chosen.response) & Node.DOCUMENT_POSITION_FOLLOWING : !visible(response)) return;
       }
       this.invalidate(key);
@@ -502,6 +551,10 @@
       this.snapshot = snapshot;
       const previous = this.turns;
       this.turns = new Map((snapshot.turns ?? []).map((turn) => [turn.id, turn]));
+      const priorLive = this.liveId;
+      const last = snapshot.turns?.at(-1);
+      this.liveId = last && !last.completed ? last.id : null;
+      if (this.liveId || this.turns.size >= VIEWPORT_HISTORY_SIZE) this.watchViewport();
       const rebind = /* @__PURE__ */ new Set();
       let added = false;
       for (const [id, turn] of this.turns) {
@@ -509,7 +562,7 @@
         if (!prior) added = true;
         if (!this.byTurn.has(id) && !this.groups.has(id)) continue;
         if (prior?.completed !== turn.completed) this.invalidate(id);
-        else if (statsChanged(prior, turn)) this.dirty.add(id);
+        else if (turn.completed && this.nearTurn(id) && statsChanged(prior, turn)) this.dirty.add(id);
       }
       for (const id of previous.keys()) {
         if (this.turns.has(id) || !this.byTurn.has(id) && !this.groups.has(id)) continue;
@@ -518,6 +571,43 @@
       }
       if (added) for (const response of this.unresolved) rebind.add(response);
       for (const response of rebind) this.bind(response);
+      if (priorLive && this.liveId !== priorLive) this.finishStream(priorLive);
+    }
+    deferStreamMutation(target, response) {
+      if (!this.liveId) return false;
+      let root = target.closest(TURN);
+      let key;
+      while (root && !(key = turnId(root, this.turns))) root = root.parentElement?.closest(TURN);
+      if (key !== this.liveId) return false;
+      if (response) {
+        if (import_protocol2.default.normalizeThreadId(response.dataset.responseAnnotationConversation) !== this.id) return false;
+      } else if (!this.streamRoots.has(root) && !import_protocol2.default.normalizeThreadId(this.liveId) && ![...this.byTurn.get(this.liveId) ?? []].some((row) => row.root === root)) return false;
+      if (!this.streamRoots.has(root)) {
+        for (const previous of this.streamRoots) if (!previous.isConnected) this.streamRoots.delete(previous);
+        this.streamRoots.add(root);
+      }
+      return true;
+    }
+    finishStream(key) {
+      if (!this.streamRoots.size) return;
+      for (const row of [...this.byTurn.get(key) ?? []]) {
+        if (!row.response.isConnected || !row.root.contains(row.response)) {
+          this.remove(row.response);
+          if (this.owners.get(row.response) === this) this.owners.delete(row.response);
+        }
+      }
+      for (const root of this.streamRoots) {
+        if (!root.isConnected) continue;
+        const responses = root.querySelectorAll(RESPONSE);
+        const bind = (response) => {
+          if (import_protocol2.default.normalizeThreadId(response.dataset.responseAnnotationConversation) !== this.id) return;
+          this.bind(response);
+          this.owners.set(response, this);
+        };
+        if (root.matches(RESPONSE)) bind(root);
+        for (const response of responses) bind(response);
+      }
+      this.streamRoots.clear();
     }
     mountFor(key) {
       if (this.mounts.has(key)) return this.mounts.get(key);
@@ -527,6 +617,7 @@
       for (const row of rows) {
         const { root, response } = row;
         if (!response.isConnected || !visible(response)) continue;
+        if (this.viewport && !this.nearby.has(response)) break;
         row.actions ??= [...response.querySelectorAll(ACTION)];
         let actions = lastVisible(row.actions);
         if (!actions) {
@@ -541,41 +632,62 @@
       return mount;
     }
     restore() {
+      if (this.viewport) {
+        for (const response of this.nearby) {
+          const key = this.nodes.get(response)?.key;
+          if (key != null) this.dirty.add(key);
+        }
+        return;
+      }
       for (const key of this.byTurn.keys()) this.dirty.add(key);
       for (const key of this.groups.keys()) this.dirty.add(key);
     }
     changeFor(key) {
       const turn = this.turns.get(key);
-      return { key, turn, mount: turn?.completed ? this.mountFor(key) : null };
+      return { key, turn, mount: turn?.completed && this.nearTurn(key) ? this.mountFor(key) : null };
+    }
+    *pendingChanges() {
+      for (const key of this.dirty) {
+        this.dirty.delete(key);
+        yield this.changeFor(key);
+      }
     }
     *changes() {
       if (!this.indexed) {
         this.initialRows ??= Array.from(document.querySelectorAll(`[data-response-annotation-conversation="${this.id}" i]`));
+        let registered = 0;
         while (this.initialRows.length) {
           const response = this.initialRows.pop();
           if (!this.nodes.has(response) && response.isConnected && import_protocol2.default.normalizeThreadId(response.dataset.responseAnnotationConversation) === this.id) {
             this.bind(response, true);
             this.owners.set(response, this);
           }
-          const key = this.nodes.get(response)?.key;
-          yield this.dirty.delete(key) ? this.changeFor(key) : null;
+          if (this.viewport) {
+            if (++registered === 32) {
+              registered = 0;
+              yield* this.pendingChanges();
+              yield;
+            }
+          } else {
+            const key = this.nodes.get(response)?.key;
+            yield this.dirty.delete(key) ? this.changeFor(key) : null;
+          }
         }
         this.initialRows = null;
         this.indexed = true;
       }
-      for (const key of this.dirty) {
-        this.dirty.delete(key);
-        yield this.changeFor(key);
-      }
+      yield* this.pendingChanges();
     }
   };
   var ReplyCache = class {
-    constructor() {
+    constructor(onVisible = () => {
+    }) {
       this.threads = /* @__PURE__ */ new Map();
       this.owners = /* @__PURE__ */ new WeakMap();
+      this.onVisible = onVisible;
     }
     select(id, snapshot) {
-      const thread = this.threads.get(id) ?? new ConversationReplies(id, this.owners);
+      const thread = this.threads.get(id) ?? new ConversationReplies(id, this.owners, this.onVisible);
       this.threads.delete(id);
       this.threads.set(id, thread);
       if (this.threads.size > 6) this.drop(this.threads.values().next().value);
@@ -583,6 +695,7 @@
       return thread;
     }
     drop(thread) {
+      thread.viewport?.disconnect();
       for (const node of thread.nodes.keys()) this.owners.delete(node);
       for (const group of thread.groups.values()) group.dispose();
       this.threads.delete(thread.id);
@@ -590,12 +703,24 @@
     visibility(scope) {
       if (!scope.firstElementChild && !scope.matches(RESPONSE + "," + ACTION)) return;
       for (const thread of this.threads.values()) {
-        for (const row of thread.nodes.values()) {
+        const responses = thread.viewport ? thread.nearby : thread.nodes.keys();
+        for (const response of responses) {
+          const row = thread.nodes.get(response);
           if (scope.contains(row.response) || row.root?.contains(scope) && (row.actions?.some((node) => scope.contains(node)) || row.siblings?.some((node) => scope.contains(node)))) {
             thread.invalidate(row.key);
           }
         }
       }
+    }
+    relevantDuringStream(record, active) {
+      const target = record.target;
+      if (target.nodeType !== 1 || target.closest(OWN)) return false;
+      if (record.type === "childList") {
+        if (record.addedNodes.length <= 1 && record.removedNodes.length <= 1 && record.addedNodes[0]?.nodeType !== 1 && record.removedNodes[0]?.nodeType !== 1) return false;
+      } else if (!["aria-hidden", "hidden", "inert"].includes(record.attributeName)) return true;
+      const response = target.closest(RESPONSE);
+      const thread = response ? this.owners.get(response) ?? this.threads.get(import_protocol2.default.normalizeThreadId(response.dataset.responseAnnotationConversation)) : active;
+      return !thread?.deferStreamMutation(target, response);
     }
     observe(records, active, dom) {
       const changed = /* @__PURE__ */ new Set();
@@ -1152,15 +1277,31 @@
   };
 
   // src/ui/details.mjs
-  var import_usage_model = __toESM(require_usage_model(), 1);
+  var import_usage_model2 = __toESM(require_usage_model(), 1);
 
   // src/ui/format.mjs
+  var import_usage_model = __toESM(require_usage_model(), 1);
   var fmt = (n) => n == null || !Number.isFinite(n) ? "\u2014" : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : Math.round(n).toLocaleString("en-US");
   var pct = (n) => n == null ? "\u2014" : `${Math.round(n)}%`;
   var elapsed = (ms) => ms == null ? "\u2014" : ms >= 6e4 ? `${(ms / 6e4).toFixed(1)} \u5206\u949F` : `${(ms / 1e3).toFixed(1)} \u79D2`;
   var tokens = (n) => n == null ? "\u6682\u65E0\u6570\u636E" : `${Math.round(n).toLocaleString("en-US")} tok`;
   var completedDate = (turn) => turn?.completedAt ? new Date(turn.completedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) : null;
   var speedLabel = (turn) => turn?.estimatedGenerationTps != null ? `${Math.round(turn.estimatedGenerationTps)} tok/s` : turn?.averageTps != null ? `\u6574\u8F6E ${turn.averageTps.toFixed(1)} tok/s` : "\u901F\u5EA6 \u2014";
+  function sessionSpeedReader(turns) {
+    const stats = import_usage_model.default.statisticsFor(turns), label = speedLabel(stats), last = turns.at(-1);
+    if (!last || last.completed || stats.estimatedGenerationTps != null) return () => label;
+    let historyMs = 0, output = last.usage?.output_tokens ?? 0;
+    for (let i = 0; i < turns.length - 1; i++) {
+      const turn = turns[i];
+      if (turn.durationMs == null) return () => label;
+      historyMs += turn.durationMs;
+      output += turn.usage?.output_tokens ?? 0;
+    }
+    return () => {
+      const duration = last.durationMs == null ? null : historyMs + last.durationMs;
+      return speedLabel({ averageTps: duration > 0 && output > 0 ? output * 1e3 / duration : null });
+    };
+  }
   function countdown(ms) {
     if (ms == null || !Number.isFinite(ms)) return "\u91CD\u7F6E\u65F6\u95F4\u4E0D\u53EF\u7528";
     if (ms <= 0) return "\u7B49\u5F85\u5237\u65B0";
@@ -1169,7 +1310,7 @@
   }
 
   // src/ui/details.mjs
-  var { statisticsFor, usageParts } = import_usage_model.default;
+  var { statisticsFor, usageParts } = import_usage_model2.default;
   function createDetailsPopover(onOpen) {
     let snapshot = null;
     let metricPanel = null, panelAnchor = null, panelCloseTimer = null, tokenModel = null;
@@ -1559,7 +1700,6 @@
   }
 
   // src/ui/app.mjs
-  var import_usage_model2 = __toESM(require_usage_model(), 1);
   var import_protocol5 = __toESM(require_protocol(), 1);
 
   // src/ui/styles.css
@@ -1571,7 +1711,10 @@
       this.life = new Lifetime();
       this.dom = new CodexDOM();
       this.replies = /* @__PURE__ */ new Map();
-      this.replyCache = new ReplyCache();
+      this.replyCache = new ReplyCache((thread) => {
+        if (this.replyThread === thread && document.visibilityState !== "hidden")
+          this.replyScan.request(() => this.renderReplies(thread), true);
+      });
       this.sessionSpeeds = /* @__PURE__ */ new WeakMap();
       this.replyScan = new BackgroundScan();
       this.readTimer = null;
@@ -1649,12 +1792,12 @@
       }
       const last = snapshot.turns?.at(-1);
       let speed = this.sessionSpeeds.get(snapshot);
-      if (!speed || speed.duration !== last?.durationMs) {
-        speed = { duration: last?.durationMs, label: speedLabel(import_usage_model2.default.statisticsFor(snapshot.turns ?? [])) };
+      if (!speed) {
+        speed = sessionSpeedReader(snapshot.turns ?? []);
         this.sessionSpeeds.set(snapshot, speed);
       }
       const items = [
-        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speed.label}` },
+        { key: "session", icon: "speed", kind: "session", text: `${snapshot.turnCount} \u8F6E ${snapshot.requests} \u6B65 \xB7 ${speed()}` },
         { key: "tokens", icon: "token", kind: "tokens", text: `${fmt(snapshot.total.total_tokens)} tok \xB7 \u7F13\u5B58\u547D\u4E2D ${pct(snapshot.cacheHitPercent)}` },
         { key: "context", icon: "context", kind: "context", text: pct(snapshot.contextPercent) }
       ];
@@ -1744,7 +1887,7 @@
         yield (deferred) => {
           if (this.replyThread !== thread || thread.dirty.has(key)) return;
           if (mount) {
-            if (mount.parent.isConnected && (!deferred || mount.stillCurrent()))
+            if ((!thread.viewport || thread.nearby.has(mount.response)) && mount.parent.isConnected && (!deferred || mount.stillCurrent()))
               this.renderReply(thread.id, key, mount, turn);
           } else {
             const group = thread.groups.get(key);
@@ -1801,7 +1944,9 @@
         for (const scope of scopes) this.replyCache.visibility(scope);
         reconcile(0);
       });
-      const observer = new MutationObserver((records) => {
+      const observer = new MutationObserver((batch) => {
+        const records = batch.filter((record) => this.replyCache.relevantDuringStream(record, this.replyThread));
+        if (!records.length) return;
         const revision = this.replyThread?.domRevision;
         this.replyCache.observe(records, this.replyThread, this.dom);
         if (document.visibilityState === "hidden") return;

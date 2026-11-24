@@ -2,6 +2,22 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {BackgroundScan} from '../src/ui/background-scan.mjs';
 
+test('滚入阅读区域的统计优先执行，连续可见事件只安排一次', t => {
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:0});
+  const scan=new BackgroundScan({now:()=>Date.now()});
+  const calls=[];
+  scan.request(function*(){calls.push('first');});
+  t.mock.timers.tick(0);
+  scan.request(function*(){calls.push('stale');});
+  scan.request(function*(){calls.push('visible');},true);
+  scan.request(function*(){calls.push('latest');},true);
+  t.mock.timers.tick(0);
+  assert.deepEqual(calls,['first','latest']);
+  scan.dispose();
+  t.mock.timers.tick(1500);
+  assert.equal(calls.length,2);
+});
+
 test('每批先完成全部布局读取，再挂载回复，最后清理已移除的行', t => {
   t.mock.timers.enable({apis:['setTimeout','Date'], now:0});
   const scan = new BackgroundScan({batchSize:2, now:() => Date.now()});

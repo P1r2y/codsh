@@ -32,6 +32,7 @@ function composerRoot(node) {
 
 export function turnId(root, turns) {
   const key = root.getAttribute('data-content-search-turn-key') ?? '';
+  if (turns.has(key)) return key;
   const candidates = [key, ...(key.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi) ?? []), ...key.split(/[^\w-]+/)];
   return candidates.find(candidate => turns.has(candidate)) ?? null;
 }

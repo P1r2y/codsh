@@ -34,6 +34,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installation 'St
 
 每个窗口在内存中保留最近 6 个对话的回复位置和统计按钮。切回仍保留的页面时复用这些结果。新增、替换或移除回复时，插件只更新受影响的行。
 
+生成回复或运行工具时，插件等当前轮结束后再定位这一轮的统计按钮。生成期间和长历史对话优先显示阅读区域附近的统计，向上滚动即可查看旧回复的用量。
+
 ```powershell
 & (Join-Path $installation 'Disable-UsagePlugin.ps1') # 停用
 & (Join-Path $installation 'Enable-UsagePlugin.ps1')  # 启用

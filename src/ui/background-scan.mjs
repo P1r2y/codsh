@@ -8,16 +8,23 @@ export class BackgroundScan {
     this.requestIdle=globalThis.requestIdleCallback?.bind(globalThis)??(fn=>setTimeout(()=>fn({didTimeout:false,timeRemaining:()=>50}),0));
     this.cancelIdle=globalThis.cancelIdleCallback?.bind(globalThis)??clearTimeout;
   }
-  request(factory) {
+  request(factory, visible = false) {
     if(this.disposed)return;
     this.pending=factory;
-    if(this.timer===null&&this.idle===null)this.plan(Math.max(0,this.interval-(this.now()-this.lastStarted)));
+    if (visible && !this.urgent) {
+      this.urgent = true;
+      clearTimeout(this.timer);
+      if (this.idle !== null) this.cancelIdle(this.idle);
+      this.idle = null;
+      this.plan(0);
+    } else if(this.timer===null&&this.idle===null)this.plan(Math.max(0,this.interval-(this.now()-this.lastStarted)));
   }
   plan(delay) {
     this.timer=setTimeout(()=>{
       this.timer=null;
       // On navigation, start the newest few rows before waiting for an idle callback.
-      if (this.lastStarted === -Infinity) {
+      if (this.lastStarted === -Infinity || this.urgent) {
+        this.urgent = false;
         this.run({didTimeout:false,timeRemaining:()=>this.budgetMs});
         return;
       }
@@ -58,6 +65,7 @@ export class BackgroundScan {
     else if(this.pending)this.plan(Math.max(this.gap,this.interval-(this.now()-this.lastStarted)));
   }
   cancel() {
+    this.urgent = false;
     clearTimeout(this.timer);if(this.idle!==null)this.cancelIdle(this.idle);
     this.timer=null;this.idle=null;this.pending=null;
     this.updates.length = 0;

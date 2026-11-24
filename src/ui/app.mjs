@@ -8,8 +8,7 @@ import { MetricGroup, invalidateMetricLayout } from './metrics.mjs';
 import { createDetailsPopover } from './details.mjs';
 import { createQuotaWidget } from './quota.mjs';
 import { element } from './elements.mjs';
-import { fmt, pct, speedLabel } from './format.mjs';
-import usageModel from '../usage-model.cjs';
+import { fmt, pct, speedLabel, sessionSpeedReader } from './format.mjs';
 import protocol from '../protocol.cjs';
 import styles from './styles.css';
 
@@ -18,7 +17,10 @@ export class UsagePlugin {
     this.life = new Lifetime();
     this.dom = new CodexDOM();
     this.replies = new Map();
-    this.replyCache = new ReplyCache();
+    this.replyCache = new ReplyCache(thread => {
+      if (this.replyThread === thread && document.visibilityState !== 'hidden')
+        this.replyScan.request(() => this.renderReplies(thread), true);
+    });
     this.sessionSpeeds = new WeakMap();
     this.replyScan = new BackgroundScan();
     this.readTimer = null;
@@ -83,12 +85,12 @@ export class UsagePlugin {
     }
     const last = snapshot.turns?.at(-1);
     let speed = this.sessionSpeeds.get(snapshot);
-    if (!speed || speed.duration !== last?.durationMs) {
-      speed = {duration:last?.durationMs, label:speedLabel(usageModel.statisticsFor(snapshot.turns ?? []))};
+    if (!speed) {
+      speed = sessionSpeedReader(snapshot.turns ?? []);
       this.sessionSpeeds.set(snapshot, speed);
     }
     const items = [
-      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${speed.label}`},
+      {key:'session',icon:'speed',kind:'session',text:`${snapshot.turnCount} 轮 ${snapshot.requests} 步 · ${speed()}`},
       {key:'tokens',icon:'token',kind:'tokens',text:`${fmt(snapshot.total.total_tokens)} tok · 缓存命中 ${pct(snapshot.cacheHitPercent)}`},
       {key:'context',icon:'context',kind:'context',text:pct(snapshot.contextPercent)}
     ];
@@ -172,7 +174,8 @@ export class UsagePlugin {
       yield deferred => {
         if (this.replyThread !== thread || thread.dirty.has(key)) return;
         if (mount) {
-          if (mount.parent.isConnected && (!deferred || mount.stillCurrent()))
+          if ((!thread.viewport || thread.nearby.has(mount.response)) &&
+            mount.parent.isConnected && (!deferred || mount.stillCurrent()))
             this.renderReply(thread.id, key, mount, turn);
         } else {
           const group = thread.groups.get(key);
@@ -230,7 +233,9 @@ export class UsagePlugin {
       for (const scope of scopes) this.replyCache.visibility(scope);
       reconcile(0);
     });
-    const observer = new MutationObserver(records => {
+    const observer = new MutationObserver(batch => {
+      const records = batch.filter(record => this.replyCache.relevantDuringStream(record, this.replyThread));
+      if (!records.length) return;
       const revision = this.replyThread?.domRevision;
       this.replyCache.observe(records, this.replyThread, this.dom);
       if (document.visibilityState === 'hidden') return;
