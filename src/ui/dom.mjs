@@ -2,13 +2,13 @@ import protocol from '../protocol.cjs';
 
 const { normalizeThreadId } = protocol;
 export const OWN = '.cu-strip,.cu-turn,.cu-ring,.cu-quota-panel,.cu-panel,#codex-usage-ui-style';
-const MARKERS = '[data-thread-find-composer],[data-thread-scroll-footer],[data-above-composer-conversation-id],'+
+export const STRUCTURAL_MARKERS = '[data-thread-find-composer],[data-thread-scroll-footer],[data-above-composer-conversation-id],'+
   '[data-content-search-turn-key],[data-response-annotation-conversation],.turn-action-controls,'+
   '[data-app-navigation-rail],[data-transition-phase],[data-chatgpt-composer]';
 
 function structural(node) {
   return node.nodeType === 1 && !node.closest(OWN) &&
-    (node.matches(MARKERS) || node.querySelector(MARKERS) !== null);
+    (node.matches(STRUCTURAL_MARKERS) || node.querySelector(STRUCTURAL_MARKERS) !== null);
 }
 
 export function visible(node) {

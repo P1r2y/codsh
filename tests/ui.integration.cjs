@@ -64,6 +64,9 @@ async function selfTest() {
     if (process.env.CODEX_USAGE_UI_TEST_CASE === 'long-stream') {
       pluginCode = require('./ui-long-stream.cjs').instrumentation + pluginCode;
     }
+    if (process.env.CODEX_USAGE_UI_TEST_CASE === 'markdown-stream') {
+      pluginCode = require('./ui-markdown-stream.cjs').instrumentation + pluginCode;
+    }
     if (process.env.CODEX_USAGE_UI_TEST_CASE === 'retained-cache') pluginCode = `(()=>{
       let counts = null;
       const queryDocument = Document.prototype.querySelectorAll, queryElement = Element.prototype.querySelectorAll;
@@ -117,6 +120,11 @@ async function selfTest() {
     },100);publishing.unref();
     await win.loadFile(path.join(__dirname,'fixture.html'));
     await new Promise(resolve=>setTimeout(resolve,2200));
+    if (process.env.CODEX_USAGE_UI_TEST_CASE === 'markdown-stream') {
+      const report = await require('./ui-markdown-stream.cjs').markdownStream(win, snapshots, fixture);
+      write({ok:Object.values(report.checks).every(Boolean), ...report});
+      win.destroy(); app.exit(0); return;
+    }
     if (process.env.CODEX_USAGE_UI_TEST_CASE === 'long-stream') {
       const report = await require('./ui-long-stream.cjs').longStream(win, snapshots, fixture, pluginEnabled);
       write({ok:Object.values(report.checks).every(Boolean), ...report});

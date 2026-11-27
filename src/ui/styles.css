@@ -10,6 +10,9 @@
 .cu-turn-inline{padding:0;margin-inline-start:6px;clear:none}.cu-action-row{column-gap:2px}
 .cu-action-row>.opacity-0{opacity:1!important}
 .turn-action-controls [class~="opacity-(--actions-opacity)"],.cu-action-row[class~="opacity-(--actions-opacity)"]{--actions-opacity:1!important}
+/* Streaming Markdown gives each new word its own entrance animation. */
+[data-markdown-text-style="assistant-message"][data-markdown-animated]{--motion-fade-in:none}
+[data-markdown-text-style="assistant-message"][data-markdown-animated] li::marker{animation-name:none!important}
 .cu-turn>span{white-space:nowrap}.cu-turn [data-cu-usage]{display:inline-flex;align-items:center;gap:4px}
 [data-app-navigation-rail]:has(.cu-ring) button:has([data-transition-phase]){display:none!important}
 .cu-ring{width:36px;height:36px;min-height:36px;flex-shrink:0;display:flex;align-items:center;justify-content:center;align-self:center;margin:0;position:relative;color:var(--color-text-secondary,var(--app-color-text-secondary,#a5abb3))}

@@ -1,12 +1,22 @@
 import protocol from '../protocol.cjs';
-import { OWN, turnId, visible } from './dom.mjs';
+import { OWN, STRUCTURAL_MARKERS, turnId, visible } from './dom.mjs';
 
 const RESPONSE = '[data-response-annotation-conversation]';
 const TURN = '[data-content-search-turn-key]';
 const ACTION = '.turn-action-controls';
 const SHELL = '[data-thread-find-composer],[data-app-navigation-rail]';
 const MARKERS = [RESPONSE, ACTION, SHELL].join(',');
+const STREAMING_MARKDOWN = '[data-markdown-text-style="assistant-message"][data-markdown-animated]';
+const FORMATTING = `:is(p,pre,code,span,em,strong,b,i,s,del,a,br,wbr,hr,h1,h2,h3,h4,h5,h6,blockquote,ul,ol,li,table,thead,tbody,tr,th,td):not(${STRUCTURAL_MARKERS},${OWN})`;
 const VIEWPORT_HISTORY_SIZE = 96;
+
+function hasElement(nodes) {
+  return Array.prototype.some.call(nodes, node => node.nodeType === 1);
+}
+
+function onlyFormatting(nodes) {
+  return Array.prototype.every.call(nodes, node => node.nodeType !== 1 || node.matches(FORMATTING));
+}
 
 function lastVisible(nodes) {
   return nodes.findLast(visible);
@@ -36,6 +46,7 @@ class ConversationReplies {
     this.nodes = new Map();
     this.byTurn = new Map();
     this.unresolved = new Set();
+    this.pendingMarkdown = new WeakSet();
     this.turns = new Map();
     this.groups = new Map();
     this.mounts = new Map();
@@ -111,6 +122,10 @@ class ConversationReplies {
     if (key == null) return;
     if (!this.byTurn.has(key)) this.byTurn.set(key, new Set());
     this.byTurn.get(key).add(row);
+    // A final nested answer may have arrived inside a formatted fragment before its turn ID.
+    if (this.pendingMarkdown.delete(response)) {
+      for (const nested of response.querySelectorAll(RESPONSE)) this.bindOwned(nested);
+    }
     // Initial discovery runs newest first. An older alternative cannot displace an already chosen reply.
     if (fromInitialList && this.mounts.has(key)) {
       const chosen = this.mounts.get(key);
@@ -166,6 +181,12 @@ class ConversationReplies {
     return true;
   }
 
+  bindOwned(response) {
+    if (protocol.normalizeThreadId(response.dataset.responseAnnotationConversation) !== this.id) return;
+    this.bind(response);
+    this.owners.set(response, this);
+  }
+
   finishStream(key) {
     if (!this.streamRoots.size) return;
     for (const row of [...(this.byTurn.get(key) ?? [])]) {
@@ -176,14 +197,8 @@ class ConversationReplies {
     }
     for (const root of this.streamRoots) {
       if (!root.isConnected) continue;
-      const responses = root.querySelectorAll(RESPONSE);
-      const bind = response => {
-        if (protocol.normalizeThreadId(response.dataset.responseAnnotationConversation) !== this.id) return;
-        this.bind(response);
-        this.owners.set(response, this);
-      };
-      if (root.matches(RESPONSE)) bind(root);
-      for (const response of responses) bind(response);
+      if (root.matches(RESPONSE)) this.bindOwned(root);
+      for (const response of root.querySelectorAll(RESPONSE)) this.bindOwned(response);
     }
     this.streamRoots.clear();
   }
@@ -309,15 +324,26 @@ export class ReplyCache {
 
   relevantDuringStream(record, active) {
     const target = record.target;
-    if (target.nodeType !== 1 || target.closest(OWN)) return false;
-    if (record.type === 'childList') {
-      if (record.addedNodes.length <= 1 && record.removedNodes.length <= 1 &&
-        record.addedNodes[0]?.nodeType !== 1 && record.removedNodes[0]?.nodeType !== 1) return false;
-    } else if (!['aria-hidden','hidden','inert'].includes(record.attributeName)) return true;
+    if (target.nodeType !== 1) return false;
+    const children = record.type === 'childList';
+    if (children && !hasElement(record.addedNodes) && !hasElement(record.removedNodes)) return false;
+    if (target.closest(OWN)) return false;
+    if (!children && !['aria-hidden','hidden','inert'].includes(record.attributeName)) return true;
     const response = target.closest(RESPONSE);
     const thread = response ? this.owners.get(response) ??
       this.threads.get(protocol.normalizeThreadId(response.dataset.responseAnnotationConversation)) : active;
-    return !thread?.deferStreamMutation(target, response);
+    if (thread?.deferStreamMutation(target, response)) return false;
+    // The renderer can stream words and syntax highlighting before the first usage event.
+    // Keep opaque widget replacements and native action/ownership changes on the normal path.
+    if (children && response && thread?.nodes.get(response)?.key == null) {
+      const body = target.closest(STREAMING_MARKDOWN);
+      if (body && (target === body || target.matches(FORMATTING)) &&
+        onlyFormatting(record.addedNodes) && onlyFormatting(record.removedNodes)) {
+        thread?.pendingMarkdown.add(response);
+        return false;
+      }
+    }
+    return true;
   }
 
   observe(records, active, dom) {
