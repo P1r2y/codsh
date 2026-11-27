@@ -49,6 +49,18 @@ async function selfTest() {
     const snapshots=new Map([[fixture.snapshot.threadId,fixture.snapshot]]),responseDelays=new Map();
     let pluginEnabled=process.env.CODEX_USAGE_UI_TEST_CASE!=='long-stream' || process.env.CODEX_USAGE_UI_TEST_DISABLED!=='1';
     let pluginCode=fs.readFileSync(process.env.CODEX_USAGE_UI_TEST_BUNDLE??path.join(__dirname,'../dist/usage-preload.cjs'),'utf8');
+    if (process.env.CODEX_USAGE_UI_TEST_CASE === 'numbers') pluginCode = `(()=>{
+      let reads=null;
+      const rect=Element.prototype.getBoundingClientRect;
+      Element.prototype.getBoundingClientRect=function() {
+        if(reads!==null && this.closest('.cu-strip')) reads++;
+        return rect.call(this);
+      };
+      document.addEventListener('start-number-measurement',()=>{reads=0;});
+      document.addEventListener('read-number-measurement',()=>{
+        document.documentElement.dataset.numberRectReads=String(reads);reads=null;
+      });
+    })();\n` + pluginCode;
     if (process.env.CODEX_USAGE_UI_TEST_CASE === 'long-stream') {
       pluginCode = require('./ui-long-stream.cjs').instrumentation + pluginCode;
     }
@@ -142,7 +154,7 @@ async function selfTest() {
       const strip=document.querySelector('.cu-strip'),rect=strip.getBoundingClientRect();
       const geometry=(${measureMetricGeometry.toString()})(strip);
       const composer=document.querySelector('.composer').getBoundingClientRect(),footer=document.querySelector('[data-thread-scroll-footer]').getBoundingClientRect();
-      return {strip:strip.textContent,stripHeight:rect.height,verticalCenterOffset:geometry.metrics[0].rowCenter-(composer.bottom+footer.bottom)/2,...geometry,replyStats:[...document.querySelectorAll('.cu-turn')].map(e=>({text:e.textContent,hoverTitles:e.querySelectorAll('[title]').length+(e.hasAttribute('title')?1:0),inline:e.parentElement.classList.contains('turn-action-controls'),nativeControls:[...e.parentElement.querySelectorAll(':scope>.opacity-0')].map(n=>getComputedStyle(n).opacity),geometry:(${measureMetricGeometry.toString()})(e)})),composerShift:composer.bottom-window.fixtureGeometryBefore.composerBottom,footers:document.querySelectorAll('.cu-turn').length,ring:!!document.querySelector('.cu-ring'),errors:window.fixtureErrors||[],width:document.querySelector('.cu-ring')?.getBoundingClientRect().width};
+      return {strip:strip.textContent,stripHeight:rect.height,verticalCenterOffset:geometry.metrics[0].rowCenter-(composer.bottom+footer.bottom)/2,...geometry,replyStats:[...document.querySelectorAll('.cu-turn')].map(e=>({text:e.textContent,hoverTitles:e.querySelectorAll('[title]').length+(e.hasAttribute('title')?1:0),inline:e.parentElement.classList.contains('turn-action-controls'),nativeControls:[...e.parentElement.querySelectorAll(':scope>.opacity-0, [data-fixture-native-actions]>button')].map(n=>String(Number(getComputedStyle(n).opacity)*Number(getComputedStyle(n.parentElement).opacity))),geometry:(${measureMetricGeometry.toString()})(e)})),composerShift:composer.bottom-window.fixtureGeometryBefore.composerBottom,footers:document.querySelectorAll('.cu-turn').length,ring:!!document.querySelector('.cu-ring'),errors:window.fixtureErrors||[],width:document.querySelector('.cu-ring')?.getBoundingClientRect().width};
     })()`;
     const report = await win.webContents.executeJavaScript(alignmentScript);
     const shot = await win.webContents.capturePage(); fs.writeFileSync(output+'.png',shot.toPNG());
@@ -150,7 +162,10 @@ async function selfTest() {
     if(process.env.CODEX_USAGE_UI_TEST_CASE==='numbers') {
       fixture.snapshot.turns.at(-1).completed=false;fixture.snapshot.turns.at(-1).averageTps=62.5;
       await delay(5200);
+      await win.webContents.executeJavaScript("document.dispatchEvent(new Event('start-number-measurement'))");
       const numbers=await numberPresentation(win,()=>{fixture.snapshot.turns.at(-1).averageTps=44.8;});
+      numbers.rectReads=await win.webContents.executeJavaScript("document.dispatchEvent(new Event('read-number-measurement'));Number(document.documentElement.dataset.numberRectReads)");
+      numbers.checks.numberSkipsGeometry=numbers.rectReads===0;
       write({ok:Object.values(numbers.checks).every(Boolean),checks:numbers.checks,numberBehavior:numbers});
       win.destroy();app.exit(0);return;
     }

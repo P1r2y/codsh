@@ -95,8 +95,18 @@ export class MetricGroup {
     const contentKey = JSON.stringify(items.map(item => [item.key,item.icon,item.kind,item.turnId,item.text,item.live === true]));
     if (contentKey === this.contentKey) return;
     this.contentKey = contentKey;
-    const previous = this.motion?.capture();
     const old = new Map([...this.node.children].map(node => [node.dataset.cuKey, node]));
+    // A measured strip uses tabular figures. Replacing digits in the same slots
+    // keeps its geometry, even while the previous number animation is still running.
+    const sameLayout = this.motion && this.node.isConnected &&
+      measuredParents.get(this.node)?.deref() === this.node.parentElement &&
+      this.node.childNodes.length === items.length && items.every((item, index) => {
+        const button = old.get(item.key);
+        if (!button || button !== this.node.children[index]) return false;
+        const text = button.querySelector('.cu-metric-label')?.dataset.cuText;
+        return text === item.text || text != null && text.replace(/\d/g, '0') === item.text.replace(/\d/g, '0');
+      });
+    const previous = sameLayout ? null : this.motion?.capture();
     let changed = false;
     for (const text of [...this.node.childNodes]) if (text.nodeType === 3) { text.remove(); changed = true; }
     items.forEach((item, index) => {
@@ -107,12 +117,14 @@ export class MetricGroup {
         button.dataset.cuKey = item.key;
         changed = true;
       }
-      button.dataset.cuKind = item.kind;
-      button.dataset.cuTurn = item.turnId ?? '';
+      if (button.dataset.cuKind !== item.kind) button.dataset.cuKind = item.kind;
+      const turn = item.turnId ?? '';
+      if (button.dataset.cuTurn !== turn) button.dataset.cuTurn = turn;
       const label = button.querySelector('.cu-metric-label');
       if (this.motion) changed = this.motion.text(label, item.text) || changed;
       else if (label.textContent !== item.text) { setText(label, item.text); changed = true; }
-      button.setAttribute('aria-label', `${item.text}，点击查看详情`);
+      const accessibleText = `${item.text}，点击查看详情`;
+      if (button.getAttribute('aria-label') !== accessibleText) button.setAttribute('aria-label', accessibleText);
       button.toggleAttribute('data-cu-live', item.live === true);
       if (this.node.children[index] !== button) {
         this.node.insertBefore(button, this.node.children[index] ?? null);
@@ -120,7 +132,7 @@ export class MetricGroup {
       }
     });
     for (const button of old.values()) { this.onRemove(button); button.remove(); changed = true; }
-    if (changed) {
+    if (changed && !sameLayout) {
       this.align();
       this.motion?.update(previous);
     }

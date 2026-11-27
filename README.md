@@ -36,6 +36,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installation 'St
 
 生成回复或运行工具时，插件等当前轮结束后再定位这一轮的统计按钮。生成期间和长历史对话优先显示阅读区域附近的统计，向上滚动即可查看旧回复的用量。
 
+回复操作栏里的复制、反馈、朗读和更多按钮在鼠标移开后也会显示。底部统计栏刷新等宽数字时复用已测量的布局，位数、单位或按钮排列变化时重新测量。
+
 ```powershell
 & (Join-Path $installation 'Disable-UsagePlugin.ps1') # 停用
 & (Join-Path $installation 'Enable-UsagePlugin.ps1')  # 启用
