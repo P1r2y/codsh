@@ -40,7 +40,7 @@ export class UsagePlugin {
       (id, knownRevision) => ipc.invoke(protocol.READ_CHANNEL, {threadId:id, knownRevision}),
       (changed, liveOnly) => {
         if (changed) { this.details.close(); return; }
-        if (liveOnly) this.renderLive(); else this.render();
+        if (liveOnly) this.renderLive(); else this.renderUsage();
       }
     );
     const strip = element('div', 'cu-strip');
@@ -103,25 +103,31 @@ export class UsagePlugin {
     this.renderStrip(snapshot, this.controller.threadId);
     this.details.update(snapshot);
   }
-  renderQuota() {
+  renderQuota(mount) {
     if(this.life.disposed||document.visibilityState==='hidden')return;
-    const mount=this.quotaMount;
-    if(!mount?.parent?.isConnected||mount.before&&mount.before.parentNode!==mount.parent)this.quotaMount=this.dom.quotaMount();
     this.lastQuotaPaint=Date.now();
-    this.quota.render({limits:this.quotaState.limits},this.quotaMount);
+    this.quota.render({limits:this.quotaState.limits}, mount === undefined ? this.dom.quotaMount() : mount);
   }
   render(context = this.dom.context()) {
     if (this.life.disposed || !document.body) return;
-    const snapshot = this.controller.snapshot;
     if (context.id !== this.controller.threadId) { this.synchronize(context); return; }
+    // Discover the native mount before changing labels can invalidate layout.
+    const mount = this.dom.quotaMount();
     if (context.composer && !this.dom.chatMode(context.composer)) {
       this.dom.alignComposer(context.composer);
       this.strip.mount(context.composer);
-      this.strip.node.dataset.cuThread = context.id ?? '';
-      this.renderStrip(snapshot, context.id);
+      const id = context.id ?? '';
+      if (this.strip.node.dataset.cuThread !== id) this.strip.node.dataset.cuThread = id;
     } else this.strip.unmount();
+    this.renderUsage(mount);
+    this.dom.reconcile();
+  }
+  renderUsage(mount) {
+    if (this.life.disposed || document.visibilityState === 'hidden') return;
+    const {snapshot, threadId} = this.controller;
+    if (this.strip.node.isConnected) this.renderStrip(snapshot, threadId);
     if (snapshot?.available) {
-      const thread = this.replyCache.select(context.id, snapshot);
+      const thread = this.replyCache.select(threadId, snapshot);
       if (this.replyThread !== thread) {
         this.replyThread = thread;
         this.replies = thread.groups;
@@ -132,11 +138,10 @@ export class UsagePlugin {
       this.replyScan.cancel();
       this.leaveReplies();
     }
+    const limits = this.quotaState.limits;
     this.quotaState.useFallback(snapshot?.limits);
-    this.quotaMount=this.dom.quotaMount();
-    this.renderQuota();
+    if (mount !== undefined || this.quotaState.limits !== limits) this.renderQuota(mount);
     this.details.update(snapshot);
-    this.dom.reconcile();
   }
   leaveReplies() {
     if (!this.replyThread) return;
@@ -196,6 +201,8 @@ export class UsagePlugin {
   align() {
     invalidateMetricLayout();
     const composer = this.dom.composer();
+    this.dom.cachedQuotaMount = undefined;
+    this.renderQuota();
     if (!this.dom.chatMode(composer)) this.dom.alignComposer(composer, true);
     this.strip.align();
     if (this.replyThread) {
@@ -233,6 +240,7 @@ export class UsagePlugin {
       for (const scope of scopes) this.replyCache.visibility(scope);
       reconcile(0);
     });
+    this.dom.watchQuota(() => reconcile(80));
     const observer = new MutationObserver(batch => {
       const records = batch.filter(record => this.replyCache.relevantDuringStream(record, this.replyThread));
       if (!records.length) return;

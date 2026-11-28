@@ -50,14 +50,20 @@ async function selfTest() {
     let pluginEnabled=process.env.CODEX_USAGE_UI_TEST_CASE!=='long-stream' || process.env.CODEX_USAGE_UI_TEST_DISABLED!=='1';
     let pluginCode=fs.readFileSync(process.env.CODEX_USAGE_UI_TEST_BUNDLE??path.join(__dirname,'../dist/usage-preload.cjs'),'utf8');
     if (process.env.CODEX_USAGE_UI_TEST_CASE === 'numbers') pluginCode = `(()=>{
-      let reads=null;
+      let reads=null, edits=0;
+      const countEdits=records=>{edits+=records.filter(r=>r.target.closest('.cu-metric-label')).length;};
+      const labels=new MutationObserver(countEdits);
       const rect=Element.prototype.getBoundingClientRect;
       Element.prototype.getBoundingClientRect=function() {
         if(reads!==null && this.closest('.cu-strip')) reads++;
         return rect.call(this);
       };
-      document.addEventListener('start-number-measurement',()=>{reads=0;});
+      document.addEventListener('start-number-measurement',()=>{
+        reads=0;edits=0;labels.observe(document.querySelector('.cu-strip'),{childList:true,subtree:true});
+      });
       document.addEventListener('read-number-measurement',()=>{
+        countEdits(labels.takeRecords());labels.disconnect();
+        document.documentElement.dataset.numberChildEdits=String(edits);
         document.documentElement.dataset.numberRectReads=String(reads);reads=null;
       });
     })();\n` + pluginCode;
@@ -88,13 +94,16 @@ async function selfTest() {
         document.documentElement.dataset.cacheCounts = JSON.stringify(counts); counts = null;
       });
     })();\n` + pluginCode;
-    if(process.env.CODEX_USAGE_UI_TEST_CASE==='performance')pluginCode=`(()=>{
-      let active=false,scans=0,layouts=0;
+    if(['performance','pacing'].includes(process.env.CODEX_USAGE_UI_TEST_CASE))pluginCode=`(()=>{
+      let active=false,scans=0,layouts=0,shellReads=0;
       const query=Document.prototype.querySelectorAll,rects=Element.prototype.getClientRects;
       Document.prototype.querySelectorAll=function(selector){if(active&&this===document&&selector==='[data-thread-find-composer]')scans++;return query.call(this,selector);};
-      Element.prototype.getClientRects=function(){if(active)layouts++;return rects.call(this);};
-      document.addEventListener('codsh-performance-start',()=>{scans=0;layouts=0;active=true;});
-      document.addEventListener('codsh-performance-read',()=>{active=false;document.documentElement.dataset.fixturePerformance=JSON.stringify({scans,layouts});});
+      Element.prototype.getClientRects=function(){
+        if(active){layouts++;if(this.matches('[data-thread-find-composer],[data-app-navigation-rail]'))shellReads++;}
+        return rects.call(this);
+      };
+      document.addEventListener('codsh-performance-start',()=>{scans=0;layouts=0;shellReads=0;active=true;});
+      document.addEventListener('codsh-performance-read',()=>{active=false;document.documentElement.dataset.fixturePerformance=JSON.stringify({scans,layouts,shellReads});});
     })();\n`+pluginCode;
     ipcMain.handle('codex-enhancement-loader:state-v1',()=>({enabled:pluginEnabled,key:'fixture',code:pluginCode}));
     let conversationReads=0;const readTimes=[];
@@ -174,6 +183,21 @@ async function selfTest() {
       const numbers=await numberPresentation(win,()=>{fixture.snapshot.turns.at(-1).averageTps=44.8;});
       numbers.rectReads=await win.webContents.executeJavaScript("document.dispatchEvent(new Event('read-number-measurement'));Number(document.documentElement.dataset.numberRectReads)");
       numbers.checks.numberSkipsGeometry=numbers.rectReads===0;
+      numbers.childEdits=await win.webContents.executeJavaScript("Number(document.documentElement.dataset.numberChildEdits)");
+      numbers.checks.numberReusesText=numbers.childEdits===0;
+      await win.webContents.executeJavaScript("document.dispatchEvent(new Event('start-number-measurement'))");
+      fixture.snapshot.turns.at(-1).averageTps=9.8;
+      const narrower = await win.webContents.executeJavaScript(`(async () => {
+        const deadline=performance.now()+7500;
+        while(performance.now()<deadline){
+          const label=document.querySelector('[data-cu-live] .cu-metric-label');
+          if(label?.dataset.cuText==='当前 9.8 tok/s' && label.textContent===label.dataset.cuText) return true;
+          await new Promise(resolve=>setTimeout(resolve,80));
+        }
+        return false;
+      })()`);
+      numbers.widthChangeReads=await win.webContents.executeJavaScript("document.dispatchEvent(new Event('read-number-measurement'));Number(document.documentElement.dataset.numberRectReads)");
+      numbers.checks.digitCountSkipsGeometry=narrower&&numbers.widthChangeReads===0;
       write({ok:Object.values(numbers.checks).every(Boolean),checks:numbers.checks,numberBehavior:numbers});
       win.destroy();app.exit(0);return;
     }

@@ -28,10 +28,12 @@ function motionClock(run) {
   const originals=names.map(name=>Object.getOwnPropertyDescriptor(globalThis,name));
   const frames=new Map();let sequence=0,preference;
   const media={matches:false,addEventListener:(_type,fn)=>{preference=fn;},removeEventListener:()=>{}};
-  const node=(value='')=>({dataset:{},isConnected:true,nodes:[],value,
-    get textContent(){return this.nodes.length?this.nodes.map(child=>child.textContent).join(''):this.value;},
-    set textContent(text){this.nodes=[];this.value=text;},replaceChildren(...children){this.nodes=children;}});
-  globalThis.document={createTextNode:node,createElement:()=>node()};
+  const textNode=data=>({nodeType:3,data,get textContent(){return this.data;}});
+  const node=(value='')=>({dataset:{},isConnected:true,nodes:value?[textNode(value)]:[],
+    get childNodes(){return this.nodes;},get firstChild(){return this.nodes[0]??null;},
+    get textContent(){return this.nodes.map(child=>child.textContent).join('');},
+    set textContent(text){this.nodes=text?[textNode(text)]:[];},replaceChildren(...children){this.nodes=children;}});
+  globalThis.document={createTextNode:textNode,createElement:()=>node()};
   globalThis.matchMedia=()=>media;
   globalThis.requestAnimationFrame=fn=>{frames.set(++sequence,fn);return sequence;};
   globalThis.cancelAnimationFrame=id=>frames.delete(id);
@@ -46,7 +48,9 @@ function motionClock(run) {
 
 test('受控帧时钟下数字连续递变，首帧延迟不跳过动画，完成后停止请求帧', () => {
   motionClock(({label,motion,step,frames})=>{
-    motion.text(label,'当前 62.5 tok/s');motion.text(label,'当前 44.8 tok/s');
+    motion.text(label,'当前 62.5 tok/s');
+    const number = label.nodes[1], digits = number.firstChild;
+    motion.text(label,'当前 44.8 tok/s');
     const samples=[];
     for(let time=100000;time<=100240;time+=16){step(time);samples.push(Number(label.nodes[1].textContent));}
     assert.equal(samples[0],62.5);
@@ -54,6 +58,7 @@ test('受控帧时钟下数字连续递变，首帧延迟不跳过动画，完�
     assert.ok(samples.filter(value=>value>44.8&&value<62.5).length>5);
     assert.ok(samples.every((value,index)=>index===0||value<=samples[index-1]));
     assert.equal(label.textContent,'当前 44.8 tok/s');
+    assert.equal(label.nodes[1], number); assert.equal(number.firstChild, digits);
     assert.equal(frames.size,0);assert.equal(motion.numbers.size,0);
   });
 });

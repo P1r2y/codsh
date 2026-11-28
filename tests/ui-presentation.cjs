@@ -167,7 +167,19 @@ async function nativeQuotaPresentation(win) {
   await delay(250);const absent=await state();
   await win.webContents.executeJavaScript(`document.querySelector('.download').before(window.fixtureNativeQuota)`);
   await delay(250);const returned=await state();
+  await win.webContents.executeJavaScript(`window.fixtureMarker=window.fixtureNativeQuota.querySelector('[data-transition-phase]');fixtureMarker.removeAttribute('data-transition-phase')`);
+  await delay(250);
+  const fallback=await win.webContents.executeJavaScript(`document.querySelector('.cu-ring').nextElementSibling===document.querySelector('.download')`);
+  await win.webContents.executeJavaScript(`fixtureMarker.setAttribute('data-transition-phase','settled')`);
+  await delay(250);const restored=await state();
+  await win.webContents.executeJavaScript(`document.querySelector('[data-app-navigation-rail]').style.display='none'`);
+  await delay(250);
+  const hidden=await win.webContents.executeJavaScript(`document.querySelector('.cu-ring')===null`);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-app-navigation-rail]').style.display=''`);
+  await delay(250);const shown=await state();
   return {replacement,absent,returned,checks:{
+    quotaMarkerChange:fallback&&restored.anchored&&restored.hidden,
+    quotaRailVisibility:hidden&&shown.anchored&&shown.rings===1,
     nativeQuotaLifecycle:[replacement,returned].every(s=>s.rings===1&&s.hidden&&s.anchored&&s.downloads&&s.profile)&&absent.rings===1&&absent.anchored&&absent.downloads&&absent.profile
   }};
 }

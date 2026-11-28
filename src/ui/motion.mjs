@@ -13,9 +13,10 @@ export function numericTransition(previous, next) {
     const precision = target.split('.')[1]?.length ?? 0;
     const oldPrecision = before[index].split('.')[1]?.length ?? 0;
     if (!Number.isFinite(from) || !Number.isFinite(to) || precision !== oldPrecision || target.includes(',') !== before[index].includes(',')) return [];
-    return [{index, from, to, target, format:value => value.toLocaleString('en-US', {
+    const formatter = new Intl.NumberFormat('en-US', {
       useGrouping:target.includes(','), minimumFractionDigits:precision, maximumFractionDigits:precision
-    })}];
+    });
+    return [{index, from, to, target, format:formatter.format}];
   });
 }
 
@@ -55,19 +56,32 @@ export class MetricMotion {
     const previous = label.textContent, initialized = label.dataset.cuText !== undefined;
     this.finishNumbers(label, false);
     label.dataset.cuText = text;
-    const parts = numericParts(text), nodes = parts.map((part, index) => {
-      if (index % 2 === 0) return document.createTextNode(part);
-      const node = document.createElement('span');node.className='cu-number';node.textContent=part;return node;
-    });
-    label.replaceChildren(...nodes);
+    const parts = numericParts(text);
+    let nodes = [...label.childNodes];
+    const reusable = nodes.length === parts.length && nodes.every((node, index) => index % 2 === 0
+      ? node.nodeType === 3 && node.data === parts[index]
+      : node.className === 'cu-number' && node.childNodes.length === 1 && node.firstChild.nodeType === 3);
+    if (!reusable) {
+      nodes = parts.map((part, index) => {
+        if (index % 2 === 0) return document.createTextNode(part);
+        const node = document.createElement('span');
+        node.className = 'cu-number'; node.textContent = part;
+        return node;
+      });
+      label.replaceChildren(...nodes);
+    }
     const transitions = initialized && !this.reduced.matches ? numericTransition(previous, text) : [];
     if (transitions.length) {
       const values = transitions.map(transition => {
         const node = nodes[transition.index];node.dataset.cuTween='';
-        return {...transition,node};
+        return {...transition,node,digits:node.firstChild};
       });
       this.numbers.set(label, {values, started:null});
       this.schedule();
+    }
+    if (reusable) for (let i = 1; i < parts.length; i += 2) {
+      const number = nodes[i];
+      if (number.dataset.cuTween === undefined && number.firstChild.data !== parts[i]) number.firstChild.data = parts[i];
     }
     return previous !== text;
   }
@@ -81,7 +95,7 @@ export class MetricMotion {
         const amount = 1-Math.pow(1-progress, 3);
         for (const value of job.values) {
           const text = value.format(value.from+(value.to-value.from)*amount);
-          if (value.node.textContent !== text) value.node.textContent=text;
+          if (value.digits.data !== text) value.digits.data = text;
         }
         if (progress === 1 || !label.isConnected) this.finishNumbers(label);
       }
@@ -92,7 +106,7 @@ export class MetricMotion {
     const job = this.numbers.get(label);
     if (!job) return;
     for (const value of job.values) {
-      if (settle) value.node.textContent=value.target;
+      if (settle && value.digits.data !== value.target) value.digits.data = value.target;
       delete value.node.dataset.cuTween;
     }
     this.numbers.delete(label);

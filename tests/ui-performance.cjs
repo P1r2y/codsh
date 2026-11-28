@@ -87,18 +87,23 @@ async function switchingPresentation(win,snapshots,fixture) {
 
 async function pacingPresentation(win,snapshot,readTimes) {
   const before=readTimes.length;
+  await win.webContents.executeJavaScript("document.dispatchEvent(new Event('codsh-performance-start'))");
   for(let i=0;i<20;i++){
     snapshot.requests++;
     await new Promise(resolve=>setTimeout(resolve,100));
   }
   await new Promise(resolve=>setTimeout(resolve,3800));
   const text=await win.webContents.executeJavaScript(`document.querySelector('.cu-strip')?.textContent`);
+  const {shellReads} = await win.webContents.executeJavaScript(`(() => {
+    document.dispatchEvent(new Event('codsh-performance-read'));
+    return JSON.parse(document.documentElement.dataset.fixturePerformance);
+  })()`);
   const reads=readTimes.slice(Math.max(0,before-1));
   const spacing=reads.slice(1).map((value,i)=>value-reads[i]);
-  return {updates:20,reads:readTimes.length-before,spacing,text,checks:{
+  return {updates:20,reads:readTimes.length-before,spacing,text,shellReads,checks:{
     coalescedReads:readTimes.length-before===1,
     slowerReads:spacing.length>0&&spacing.every(ms=>ms>=4900),
-    latestData:text.includes(snapshot.requests+' 步')
+    latestData:text.includes(snapshot.requests+' 步'), cachedMounts:shellReads===0
   }};
 }
 

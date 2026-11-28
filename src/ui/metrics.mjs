@@ -96,17 +96,17 @@ export class MetricGroup {
     if (contentKey === this.contentKey) return;
     this.contentKey = contentKey;
     const old = new Map([...this.node.children].map(node => [node.dataset.cuKey, node]));
-    // A measured strip uses tabular figures. Replacing digits in the same slots
-    // keeps its geometry, even while the previous number animation is still running.
-    const sameLayout = this.motion && this.node.isConnected &&
+    // A change in the number of tabular digits can move a button horizontally,
+    // but its measured text baseline still applies. Let flex lay it out once.
+    const numbersOnly = this.motion && this.node.isConnected &&
       measuredParents.get(this.node)?.deref() === this.node.parentElement &&
       this.node.childNodes.length === items.length && items.every((item, index) => {
         const button = old.get(item.key);
         if (!button || button !== this.node.children[index]) return false;
         const text = button.querySelector('.cu-metric-label')?.dataset.cuText;
-        return text === item.text || text != null && text.replace(/\d/g, '0') === item.text.replace(/\d/g, '0');
+        return text === item.text || text != null && text.replace(/\d+/g, '0') === item.text.replace(/\d+/g, '0');
       });
-    const previous = sameLayout ? null : this.motion?.capture();
+    const previous = numbersOnly ? null : this.motion?.capture();
     let changed = false;
     for (const text of [...this.node.childNodes]) if (text.nodeType === 3) { text.remove(); changed = true; }
     items.forEach((item, index) => {
@@ -132,7 +132,7 @@ export class MetricGroup {
       }
     });
     for (const button of old.values()) { this.onRemove(button); button.remove(); changed = true; }
-    if (changed && !sameLayout) {
+    if (changed && !numbersOnly) {
       this.align();
       this.motion?.update(previous);
     }

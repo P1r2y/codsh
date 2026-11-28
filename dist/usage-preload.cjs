@@ -1,4 +1,4 @@
-// codsh-source-sha256:611dbe6430dac003dd56dbff91a9cbcc1c33befb9bf5906d5c367ed22017064f
+// codsh-source-sha256:16416b5318d9204e77f977c60a54ab0895945c36ab828ec034e5712705ca39c1
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -305,6 +305,8 @@
     invalidateShell() {
       this.composerNodes = null;
       this.rails = null;
+      this.cachedQuotaMount = void 0;
+      this.quotaObserver?.disconnect();
       this.fallbackThread = null;
     }
     responseChanged(response) {
@@ -315,23 +317,32 @@
     }
     watchVisibility(callback) {
       this.visibilityObserver = new MutationObserver((records) => {
-        const normalize = (value, name) => name === "class" ? (value ?? "").split(/\s+/).filter((x) => x && !x.startsWith("cu-")).sort().join(" ") : (value ?? "").split(";").map((x) => x.trim()).filter((x) => /^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(";");
+        const normalize = (value, name) => {
+          if (name === "class") return (value ?? "").split(/\s+/).filter((x) => x && !x.startsWith("cu-")).sort().join(" ");
+          if (name === "style") return (value ?? "").split(";").map((x) => x.trim()).filter((x) => /^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(";");
+          return value;
+        };
         const changed = records.filter((r) => normalize(r.oldValue, r.attributeName) !== normalize(r.target.getAttribute(r.attributeName), r.attributeName));
-        if (changed.length) callback(new Set(changed.map((r) => r.target)));
+        if (changed.length) {
+          if (changed.some((r) => this.rails?.some((rail) => r.target.contains(rail)))) this.cachedQuotaMount = void 0;
+          callback(new Set(changed.map((r) => r.target)));
+        }
       });
     }
-    trackVisibility(nodes) {
+    trackVisibility() {
       const next = /* @__PURE__ */ new Set();
-      for (const node of nodes) for (let parent = node; parent; parent = parent.parentElement) next.add(parent);
+      for (const node of [...this.composerNodes ?? [], ...this.rails ?? []]) {
+        for (let parent = node; parent; parent = parent.parentElement) next.add(parent);
+      }
       if (next.size === this.visibilityNodes.size && [...next].every((node) => this.visibilityNodes.has(node))) return;
       this.visibilityNodes = next;
       this.visibilityObserver?.disconnect();
-      for (const node of next) this.visibilityObserver?.observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ["class", "style"] });
+      for (const node of next) this.visibilityObserver?.observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ["class", "style", "hidden", "inert", "aria-hidden"] });
     }
     composer() {
       if (!this.composerNodes) {
         this.composerNodes = [...document.querySelectorAll("[data-thread-find-composer]")].filter((node) => !node.matches("button,input,textarea"));
-        this.trackVisibility(this.composerNodes);
+        this.trackVisibility();
       }
       const all = this.composerNodes;
       const nodes = [...new Set(all.filter(visible).map(composerRoot))];
@@ -362,7 +373,38 @@
       return { composer, id: this.thread(composer) };
     }
     quotaMount() {
-      this.rails ??= [...document.querySelectorAll("[data-app-navigation-rail]")];
+      const mount = this.cachedQuotaMount;
+      if (mount === null || mount?.parent.isConnected && (!mount.before || mount.before.parentNode === mount.parent)) return mount;
+      return this.cachedQuotaMount = this.findQuotaMount();
+    }
+    watchQuota(callback) {
+      this.quotaObserver = new MutationObserver((records) => {
+        const changed = records.some(({ type, target, addedNodes, removedNodes, attributeName, oldValue }) => {
+          if (target.closest(OWN)) return false;
+          if (type === "attributes") {
+            if (attributeName === "data-transition-phase") return oldValue === null || !target.hasAttribute(attributeName);
+            return oldValue !== target.getAttribute(attributeName);
+          }
+          return [addedNodes, removedNodes].some((list) => Array.prototype.some.call(list, (node) => node.nodeType === 1 && !node.matches(OWN)));
+        });
+        if (changed) {
+          this.cachedQuotaMount = void 0;
+          callback();
+        }
+      });
+    }
+    findQuotaMount() {
+      if (!this.rails) {
+        this.rails = [...document.querySelectorAll("[data-app-navigation-rail]")];
+        this.trackVisibility();
+        for (const rail2 of this.rails) this.quotaObserver?.observe(rail2, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeOldValue: true,
+          attributeFilter: ["data-transition-phase", "aria-label", "title", "role", "hidden", "inert", "aria-hidden"]
+        });
+      }
       const rail = this.rails.find(visible);
       if (!rail) return null;
       const buttons = [...rail.querySelectorAll('button,[role="button"]')].filter((node) => !node.closest(OWN));
@@ -425,12 +467,13 @@
         return !["hidden", "aria-hidden", "inert"].includes(record.attributeName) || structural(target);
       }
       const nodes = [...record.addedNodes, ...record.removedNodes];
-      if ([...record.removedNodes].some((node) => node.nodeType === 1 && node.matches(".cu-strip,.cu-turn") && !node.isConnected)) return true;
+      if ([...record.removedNodes].some((node) => node.nodeType === 1 && node.matches(".cu-strip,.cu-turn,.cu-ring") && !node.isConnected)) return true;
       if (nodes.some(structural)) return true;
       return target?.matches("[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]") && nodes.some((node) => node.nodeType === 1 && !node.matches(OWN));
     }
     dispose() {
       this.visibilityObserver?.disconnect();
+      this.quotaObserver?.disconnect();
       this.visibilityNodes.clear();
       for (const footer of this.footers) {
         footer.classList.remove("cu-footer");
@@ -1017,11 +1060,12 @@
       const precision = target.split(".")[1]?.length ?? 0;
       const oldPrecision = before[index].split(".")[1]?.length ?? 0;
       if (!Number.isFinite(from) || !Number.isFinite(to) || precision !== oldPrecision || target.includes(",") !== before[index].includes(",")) return [];
-      return [{ index, from, to, target, format: (value) => value.toLocaleString("en-US", {
+      const formatter = new Intl.NumberFormat("en-US", {
         useGrouping: target.includes(","),
         minimumFractionDigits: precision,
         maximumFractionDigits: precision
-      }) }];
+      });
+      return [{ index, from, to, target, format: formatter.format }];
     });
   }
   var MetricMotion = class {
@@ -1060,23 +1104,32 @@
       const previous = label.textContent, initialized = label.dataset.cuText !== void 0;
       this.finishNumbers(label, false);
       label.dataset.cuText = text;
-      const parts = numericParts(text), nodes = parts.map((part, index) => {
-        if (index % 2 === 0) return document.createTextNode(part);
-        const node = document.createElement("span");
-        node.className = "cu-number";
-        node.textContent = part;
-        return node;
-      });
-      label.replaceChildren(...nodes);
+      const parts = numericParts(text);
+      let nodes = [...label.childNodes];
+      const reusable = nodes.length === parts.length && nodes.every((node, index) => index % 2 === 0 ? node.nodeType === 3 && node.data === parts[index] : node.className === "cu-number" && node.childNodes.length === 1 && node.firstChild.nodeType === 3);
+      if (!reusable) {
+        nodes = parts.map((part, index) => {
+          if (index % 2 === 0) return document.createTextNode(part);
+          const node = document.createElement("span");
+          node.className = "cu-number";
+          node.textContent = part;
+          return node;
+        });
+        label.replaceChildren(...nodes);
+      }
       const transitions = initialized && !this.reduced.matches ? numericTransition(previous, text) : [];
       if (transitions.length) {
         const values = transitions.map((transition) => {
           const node = nodes[transition.index];
           node.dataset.cuTween = "";
-          return { ...transition, node };
+          return { ...transition, node, digits: node.firstChild };
         });
         this.numbers.set(label, { values, started: null });
         this.schedule();
+      }
+      if (reusable) for (let i = 1; i < parts.length; i += 2) {
+        const number = nodes[i];
+        if (number.dataset.cuTween === void 0 && number.firstChild.data !== parts[i]) number.firstChild.data = parts[i];
       }
       return previous !== text;
     }
@@ -1090,7 +1143,7 @@
           const amount = 1 - Math.pow(1 - progress, 3);
           for (const value of job.values) {
             const text = value.format(value.from + (value.to - value.from) * amount);
-            if (value.node.textContent !== text) value.node.textContent = text;
+            if (value.digits.data !== text) value.digits.data = text;
           }
           if (progress === 1 || !label.isConnected) this.finishNumbers(label);
         }
@@ -1101,7 +1154,7 @@
       const job = this.numbers.get(label);
       if (!job) return;
       for (const value of job.values) {
-        if (settle) value.node.textContent = value.target;
+        if (settle && value.digits.data !== value.target) value.digits.data = value.target;
         delete value.node.dataset.cuTween;
       }
       this.numbers.delete(label);
@@ -1244,13 +1297,13 @@
       if (contentKey === this.contentKey) return;
       this.contentKey = contentKey;
       const old = new Map([...this.node.children].map((node) => [node.dataset.cuKey, node]));
-      const sameLayout = this.motion && this.node.isConnected && measuredParents.get(this.node)?.deref() === this.node.parentElement && this.node.childNodes.length === items.length && items.every((item, index) => {
+      const numbersOnly = this.motion && this.node.isConnected && measuredParents.get(this.node)?.deref() === this.node.parentElement && this.node.childNodes.length === items.length && items.every((item, index) => {
         const button = old.get(item.key);
         if (!button || button !== this.node.children[index]) return false;
         const text = button.querySelector(".cu-metric-label")?.dataset.cuText;
-        return text === item.text || text != null && text.replace(/\d/g, "0") === item.text.replace(/\d/g, "0");
+        return text === item.text || text != null && text.replace(/\d+/g, "0") === item.text.replace(/\d+/g, "0");
       });
-      const previous = sameLayout ? null : this.motion?.capture();
+      const previous = numbersOnly ? null : this.motion?.capture();
       let changed = false;
       for (const text of [...this.node.childNodes]) if (text.nodeType === 3) {
         text.remove();
@@ -1286,7 +1339,7 @@
         button.remove();
         changed = true;
       }
-      if (changed && !sameLayout) {
+      if (changed && !numbersOnly) {
         this.align();
         this.motion?.update(previous);
       }
@@ -1787,7 +1840,7 @@
             return;
           }
           if (liveOnly) this.renderLive();
-          else this.render();
+          else this.renderUsage();
         }
       );
       const strip = element("div", "cu-strip");
@@ -1856,28 +1909,33 @@
       this.renderStrip(snapshot, this.controller.threadId);
       this.details.update(snapshot);
     }
-    renderQuota() {
+    renderQuota(mount) {
       if (this.life.disposed || document.visibilityState === "hidden") return;
-      const mount = this.quotaMount;
-      if (!mount?.parent?.isConnected || mount.before && mount.before.parentNode !== mount.parent) this.quotaMount = this.dom.quotaMount();
       this.lastQuotaPaint = Date.now();
-      this.quota.render({ limits: this.quotaState.limits }, this.quotaMount);
+      this.quota.render({ limits: this.quotaState.limits }, mount === void 0 ? this.dom.quotaMount() : mount);
     }
     render(context = this.dom.context()) {
       if (this.life.disposed || !document.body) return;
-      const snapshot = this.controller.snapshot;
       if (context.id !== this.controller.threadId) {
         this.synchronize(context);
         return;
       }
+      const mount = this.dom.quotaMount();
       if (context.composer && !this.dom.chatMode(context.composer)) {
         this.dom.alignComposer(context.composer);
         this.strip.mount(context.composer);
-        this.strip.node.dataset.cuThread = context.id ?? "";
-        this.renderStrip(snapshot, context.id);
+        const id = context.id ?? "";
+        if (this.strip.node.dataset.cuThread !== id) this.strip.node.dataset.cuThread = id;
       } else this.strip.unmount();
+      this.renderUsage(mount);
+      this.dom.reconcile();
+    }
+    renderUsage(mount) {
+      if (this.life.disposed || document.visibilityState === "hidden") return;
+      const { snapshot, threadId } = this.controller;
+      if (this.strip.node.isConnected) this.renderStrip(snapshot, threadId);
       if (snapshot?.available) {
-        const thread = this.replyCache.select(context.id, snapshot);
+        const thread = this.replyCache.select(threadId, snapshot);
         if (this.replyThread !== thread) {
           this.replyThread = thread;
           this.replies = thread.groups;
@@ -1888,11 +1946,10 @@
         this.replyScan.cancel();
         this.leaveReplies();
       }
+      const limits = this.quotaState.limits;
       this.quotaState.useFallback(snapshot?.limits);
-      this.quotaMount = this.dom.quotaMount();
-      this.renderQuota();
+      if (mount !== void 0 || this.quotaState.limits !== limits) this.renderQuota(mount);
       this.details.update(snapshot);
-      this.dom.reconcile();
     }
     leaveReplies() {
       if (!this.replyThread) return;
@@ -1953,6 +2010,8 @@
     align() {
       invalidateMetricLayout();
       const composer = this.dom.composer();
+      this.dom.cachedQuotaMount = void 0;
+      this.renderQuota();
       if (!this.dom.chatMode(composer)) this.dom.alignComposer(composer, true);
       this.strip.align();
       if (this.replyThread) {
@@ -1990,6 +2049,7 @@
         for (const scope of scopes) this.replyCache.visibility(scope);
         reconcile(0);
       });
+      this.dom.watchQuota(() => reconcile(80));
       const observer = new MutationObserver((batch) => {
         const records = batch.filter((record) => this.replyCache.relevantDuringStream(record, this.replyThread));
         if (!records.length) return;

@@ -47,6 +47,8 @@ export class CodexDOM {
   invalidateShell() {
     this.composerNodes = null;
     this.rails = null;
+    this.cachedQuotaMount = undefined;
+    this.quotaObserver?.disconnect();
     this.fallbackThread = null;
   }
   responseChanged(response) {
@@ -56,27 +58,34 @@ export class CodexDOM {
     else this.fallbackResponses.delete(response);
   }
   watchVisibility(callback) {
-    // Observe only composer ancestors, not every class/style mutation in streamed text.
+    // Only shell ancestors affect the visibility of our mounts.
     this.visibilityObserver = new MutationObserver(records => {
-      const normalize = (value, name) => name === 'class'
-        ? (value ?? '').split(/\s+/).filter(x => x && !x.startsWith('cu-')).sort().join(' ')
-        : (value ?? '').split(';').map(x=>x.trim()).filter(x=>/^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(';');
+      const normalize = (value, name) => {
+        if (name === 'class') return (value ?? '').split(/\s+/).filter(x => x && !x.startsWith('cu-')).sort().join(' ');
+        if (name === 'style') return (value ?? '').split(';').map(x=>x.trim()).filter(x=>/^(?:display|visibility|content-visibility)\s*:/.test(x)).sort().join(';');
+        return value;
+      };
       const changed = records.filter(r => normalize(r.oldValue,r.attributeName) !== normalize(r.target.getAttribute(r.attributeName),r.attributeName));
-      if (changed.length) callback(new Set(changed.map(r => r.target)));
+      if (changed.length) {
+        if (changed.some(r => this.rails?.some(rail => r.target.contains(rail)))) this.cachedQuotaMount = undefined;
+        callback(new Set(changed.map(r => r.target)));
+      }
     });
   }
-  trackVisibility(nodes) {
+  trackVisibility() {
     const next = new Set();
-    for(const node of nodes)for(let parent=node;parent;parent=parent.parentElement)next.add(parent);
+    for (const node of [...(this.composerNodes ?? []), ...(this.rails ?? [])]) {
+      for (let parent = node; parent; parent = parent.parentElement) next.add(parent);
+    }
     if(next.size === this.visibilityNodes.size && [...next].every(node=>this.visibilityNodes.has(node)))return;
     this.visibilityNodes=next;
     this.visibilityObserver?.disconnect();
-    for(const node of next)this.visibilityObserver?.observe(node,{attributes:true,attributeOldValue:true,attributeFilter:['class','style']});
+    for(const node of next)this.visibilityObserver?.observe(node,{attributes:true,attributeOldValue:true,attributeFilter:['class','style','hidden','inert','aria-hidden']});
   }
   composer() {
     if (!this.composerNodes) {
       this.composerNodes = [...document.querySelectorAll('[data-thread-find-composer]')].filter(node=>!node.matches('button,input,textarea'));
-      this.trackVisibility(this.composerNodes);
+      this.trackVisibility();
     }
     const all = this.composerNodes;
     const nodes = [...new Set(all.filter(visible).map(composerRoot))];
@@ -109,7 +118,33 @@ export class CodexDOM {
     return {composer,id:this.thread(composer)};
   }
   quotaMount() {
-    this.rails ??= [...document.querySelectorAll('[data-app-navigation-rail]')];
+    const mount = this.cachedQuotaMount;
+    if (mount === null || mount?.parent.isConnected && (!mount.before || mount.before.parentNode === mount.parent)) return mount;
+    return this.cachedQuotaMount = this.findQuotaMount();
+  }
+  watchQuota(callback) {
+    this.quotaObserver = new MutationObserver(records => {
+      const changed = records.some(({type, target, addedNodes, removedNodes, attributeName, oldValue}) => {
+        if (target.closest(OWN)) return false;
+        if (type === 'attributes') {
+          if (attributeName === 'data-transition-phase') return oldValue === null || !target.hasAttribute(attributeName);
+          return oldValue !== target.getAttribute(attributeName);
+        }
+        return [addedNodes, removedNodes].some(list => Array.prototype.some.call(list, node => node.nodeType === 1 && !node.matches(OWN)));
+      });
+      if (changed) {
+        this.cachedQuotaMount = undefined;
+        callback();
+      }
+    });
+  }
+  findQuotaMount() {
+    if (!this.rails) {
+      this.rails = [...document.querySelectorAll('[data-app-navigation-rail]')];
+      this.trackVisibility();
+      for (const rail of this.rails) this.quotaObserver?.observe(rail, {childList:true, subtree:true, attributes:true, attributeOldValue:true,
+        attributeFilter:['data-transition-phase','aria-label','title','role','hidden','inert','aria-hidden']});
+    }
     const rail = this.rails.find(visible);
     if (!rail) return null;
     const buttons = [...rail.querySelectorAll('button,[role="button"]')].filter(node => !node.closest(OWN));
@@ -176,13 +211,14 @@ export class CodexDOM {
     }
     const nodes=[...record.addedNodes,...record.removedNodes];
     // React may remove an injected row without changing any native marker.
-    if([...record.removedNodes].some(node=>node.nodeType===1&&node.matches('.cu-strip,.cu-turn')&&!node.isConnected))return true;
+    if([...record.removedNodes].some(node=>node.nodeType===1&&node.matches('.cu-strip,.cu-turn,.cu-ring')&&!node.isConnected))return true;
     if(nodes.some(structural))return true;
     return target?.matches('[data-thread-find-composer],[data-thread-scroll-footer],.turn-action-controls,[data-app-navigation-rail]')&&
       nodes.some(node=>node.nodeType===1&&!node.matches(OWN));
   }
   dispose() {
     this.visibilityObserver?.disconnect();
+    this.quotaObserver?.disconnect();
     this.visibilityNodes.clear();
     for (const footer of this.footers) {
       footer.classList.remove('cu-footer');
