@@ -70,7 +70,7 @@ async function streamOutput(batches) {
   const range = document.createRange();
   range.selectNodeContents(paragraph);
   const animations = body.getAnimations({subtree:true}).filter(a => a.animationName === 'fixture-word').length;
-  return {
+  const sample = {
     batches, words:body.querySelectorAll('.word').length, animations,
     scans:Number(document.documentElement.dataset.fixtureScans),
     markerAnimation:getComputedStyle(list.firstElementChild, '::marker').animationName,
@@ -78,6 +78,22 @@ async function streamOutput(batches) {
     widgetAnimation:getComputedStyle(body.querySelector('.fixture-widget')).animationName,
     textIntact:range.toString() === expected.join('') && code.textContent === 'const step = ' + (batches - 1)
   };
+  const wordEffect = () => getComputedStyle(paragraph.firstElementChild).animation;
+  const markerEffect = () => getComputedStyle(list.firstElementChild, '::marker').animation;
+  const wordWithPlugin = wordEffect(), markerWithPlugin = markerEffect();
+  const pluginSheet = document.getElementById('codex-usage-ui-style').sheet;
+  pluginSheet.disabled = true;
+  try {
+    sample.matchesClient = wordWithPlugin === wordEffect() && markerWithPlugin === markerEffect();
+  } finally {
+    pluginSheet.disabled = false;
+  }
+  // The client also controls when the same content is rendered without animation.
+  body.removeAttribute('data-markdown-animated');
+  const staticWord = getComputedStyle(paragraph.firstElementChild).animationName;
+  const staticMarker = getComputedStyle(list.firstElementChild, '::marker').animationName;
+  body.setAttribute('data-markdown-animated', '');
+  return {...sample, staticWord, staticMarker};
 }
 
 async function markdownStream(win, snapshots, {snapshot}) {
@@ -106,8 +122,10 @@ async function markdownStream(win, snapshots, {snapshot}) {
     JSON.stringify('<div><div class="turn-action-controls"><button aria-label="复制">复制</button></div></div>') + ')');
   const mounted = await ready('.turn-action-controls > ' + selector);
   return {sample, checks:{
-    noContentScans:sample.scans === 0, noWordAnimations:sample.animations === 0,
-    noMarkerFade:sample.markerAnimation === 'none', userMotion:sample.userAnimation === 'fixture-word',
+    noContentScans:sample.scans === 0, wordFade:sample.words > 0 && sample.animations === sample.words,
+    markerFade:sample.markerAnimation === 'fixture-marker', clientTiming:sample.matchesClient,
+    nativeMotionOff:sample.staticWord === 'none' && sample.staticMarker === 'none',
+    userMotion:sample.userAnimation === 'fixture-word',
     widgetMotion:sample.widgetAnimation === 'fixture-widget', textIntact:sample.textIntact,
     completed, mounted, noErrors:await page('window.fixtureErrors.length === 0')
   }};
